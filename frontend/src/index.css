@@ -1,0 +1,115 @@
+/* ============================================ */
+/* BASE STYLES & GLOBAL RESETS */
+/* ============================================ */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  margin: 0;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Roboto', 'Oxygen',
+    'Ubuntu', 'Cantarell', 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  line-height: 1.6;
+}
+
+code {
+  font-family: 'Monaco', 'Consolas', source-code-pro, Menlo, Monaco, 'Courier New', monospace;
+}
+
+/* ============================================ */
+/* ACCESSIBILITY - FOCUS STATES */
+/* ============================================ */
+
+/* Ensure focus is visible for keyboard navigation */
+*:focus-visible {
+  outline: 3px solid #3b82f6;
+  outline-offset: 2px;
+}
+
+/* Remove outline for mouse users */
+*:focus:not(:focus-visible) {
+  outline: none;
+}
+
+/* High contrast mode support */
+@media (prefers-contrast: high) {
+  * {
+    border-color: currentColor !important;
+  }
+}
+
+/* ============================================ */
+/* REDUCED MOTION SUPPORT */
+/* ============================================ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* ============================================ */
+/* PRINT STYLES */
+/* ============================================ */
+
+@media print {
+  body {
+    background: white !important;
+    color: black !important;
+  }
+
+  /* Hide navigation and interactive elements when printing */
+  .tabs,
+  button,
+  input,
+  .back-link,
+  .download-actions {
+    display: none !important;
+  }
+
+  /* Ensure certificate details are visible */
+  .cert-card,
+  .cert-details,
+  .verification-badge {
+    border: 2px solid black !important;
+    background: white !important;
+    page-break-inside: avoid;
+  }
+
+  /* Show QR code for verification */
+  .qr-code {
+    display: block !important;
+  }
+}
+
+/* ============================================ */
+/* SELECTION STYLING */
+/* ============================================ */
+
+::selection {
+  background-color: rgba(59, 130, 246, 0.3);
+  color: inherit;
+}
+
+::-moz-selection {
+  background-color: rgba(59, 130, 246, 0.3);
+  color: inherit;
+}
+

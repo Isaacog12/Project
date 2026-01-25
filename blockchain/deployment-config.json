@@ -1,0 +1,7 @@
+{
+  "address": "0x5FbDB2315678afecb367f032d93F642f64180aa3",
+  "network": "localhost",
+  "chainId": 1337,
+  "deployedAt": "2026-01-23T22:46:57.589Z",
+  "contractName": "CertificateRegistry"
+}
