@@ -161,7 +161,7 @@ const provider = new ethers.JsonRpcProvider(
     },
     {
         staticNetwork: true,
-        timeout: 30000 // 30 seconds timeout
+        timeout: 60000 // 60 seconds timeout
     }
 );
 const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
@@ -207,7 +207,7 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
     const timesItalic = await pdfDoc.embedFont(StandardFonts.TimesRomanItalic);
 
     // Veritas green color
-    const veritasGreen = rgb(0.04, 0.29, 0.20);
+    const Green = rgb(0.04, 0.29, 0.20);
     const goldColor = rgb(0.72, 0.53, 0.04);
     const darkGray = rgb(0.2, 0.2, 0.2);
 
@@ -254,7 +254,7 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
         y: innerMargin,
         width: width - (innerMargin * 2),
         height: height - (innerMargin * 2),
-        borderColor: veritasGreen,
+        borderColor: Green,
         borderWidth: 2,
     });
 
@@ -283,7 +283,7 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
             y: corner.y - 3,
             width: ornamentSize - 6,
             height: ornamentSize - 6,
-            color: veritasGreen,
+            color: Green,
         });
     });
 
@@ -315,7 +315,7 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
         y: height - 135,
         size: universitySize,
         font: timesBold,
-        color: veritasGreen,
+        color: Green,
     });
 
     // Decorative line under university name
@@ -335,7 +335,7 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
         y: height - 200,
         size: titleSize,
         font: timesBold,
-        color: veritasGreen,
+        color: Green,
     });
 
     // Decorative lines around title
@@ -406,7 +406,7 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
         y: height - 365,
         size: courseSize,
         font: timesBold,
-        color: veritasGreen,
+        color: Green,
     });
 
     // Grade display
@@ -481,7 +481,7 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
         x: sealX,
         y: sealY,
         size: sealRadius - 8,
-        borderColor: veritasGreen,
+        borderColor: Green,
         borderWidth: 2,
     });
 
@@ -491,14 +491,14 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
         y: sealY + 5,
         size: 8,
         font: helveticaBold,
-        color: veritasGreen,
+        color: Green,
     });
     page.drawText('SEAL', {
         x: sealX - 12,
         y: sealY - 5,
         size: 8,
         font: helveticaBold,
-        color: veritasGreen,
+        color: Green,
     });
 
     // === QR CODE (Right side) ===
@@ -526,7 +526,7 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
         y: 60,
         size: 8,
         font: helveticaBold,
-        color: veritasGreen
+        color: Green
     });
 
     // Certificate ID
@@ -547,6 +547,42 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
             color: rgb(0.6, 0.6, 0.6)
         });
     }
+
+    // === VERIFICATION STAMP ===
+    const stampText = `VERIFIED: ${certData.certId}`;
+    const stampFontSize = 12;
+    const stampTextWidth = helveticaBold.widthOfTextAtSize(stampText, stampFontSize);
+
+    // Blue badge at bottom
+    page.drawRectangle({
+        x: width / 2 - stampTextWidth / 2 - 10,
+        y: 20,
+        width: stampTextWidth + 20,
+        height: 25,
+        color: rgb(0.1, 0.3, 0.5),
+    });
+
+    page.drawText(stampText, {
+        x: width / 2 - stampTextWidth / 2,
+        y: 27,
+        size: stampFontSize,
+        font: helveticaBold,
+        color: rgb(1, 1, 1),
+    });
+
+    // Large diagonal watermark
+    const watermarkSize = 40;
+    const watermarkWidth = helveticaBold.widthOfTextAtSize(certData.certId, watermarkSize);
+
+    page.drawText(certData.certId, {
+        x: width / 2 - watermarkWidth / 2,
+        y: height / 2,
+        size: watermarkSize,
+        font: helveticaBold,
+        color: rgb(0.8, 0.8, 0.8),
+        opacity: 0.3,
+        rotate: { type: 'degrees', angle: 45 },
+    });
 
     return await pdfDoc.save();
 }
@@ -1058,6 +1094,32 @@ app.delete('/api/admin/certificates/:certId', authenticateToken, async (req, res
             return res.status(404).json({ error: 'Certificate not found' });
         }
 
+        // Check blockchain status and revoke if active
+        try {
+            const result = await contract.verifyCertificate(certId);
+            const isRevoked = result[4]; // 5th return value is isRevoked boolean
+
+            if (!isRevoked) {
+                console.log(`⚠️ Auto-revoking certificate ${certId} before deletion...`);
+                const tx = await contract.revokeCertificate(certId);
+                console.log(`⏳ Revocation tx sent: ${tx.hash}`);
+                await tx.wait();
+                console.log(`✅ Certificate ${certId} revoked on blockchain.`);
+            } else {
+                console.log(`ℹ️ Certificate ${certId} is already revoked on blockchain.`);
+            }
+        } catch (blockchainError) {
+            console.error('Blockchain revocation failed during delete:', blockchainError);
+            // If it's a "Certificate does not exist" error, we can proceed with deletion
+            // otherwise we might want to stop to prevent inconsistency, or at least warn.
+            if (!blockchainError.message.includes("Certificate does not exist")) {
+                return res.status(500).json({
+                    error: 'Failed to revoke certificate on blockchain. Deletion aborted.',
+                    details: blockchainError.message
+                });
+            }
+        }
+
         if (dbCert.documentPath) {
             const filePath = path.join(__dirname, 'uploads', dbCert.documentPath);
             if (fs.existsSync(filePath)) {
@@ -1069,7 +1131,7 @@ app.delete('/api/admin/certificates/:certId', authenticateToken, async (req, res
 
         res.json({
             success: true,
-            message: 'Certificate deleted from database. Note: Blockchain record is permanent.'
+            message: 'Certificate revoked on blockchain and deleted from database.'
         });
     } catch (error) {
         console.error('Delete certificate error:', error);

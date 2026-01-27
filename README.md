@@ -14,23 +14,32 @@ A secure, blockchain-based certificate verification system for educational insti
 ## 🚀 Tech Stack
 
 ### Frontend
-- React.js
-- Premium CSS with glassmorphism effects
-- Responsive design with mobile optimization
-- Accessibility (WCAG AA compliant)
+- **React.js (v19)** - Component-based UI library
+- **React Router DOM (v7)** - Client-side routing
+- **Axios** - Promise-based HTTP client
+- **CSS3** - Custom styling with glassmorphism effects and animations
+- **Web Vitals** - Performance monitoring
 
-### Backend
-- Node.js + Express
-- SQLite database
-- PDF generation with pdf-lib
-- QR code generation
-- File upload handling
+### Backend API
+- **Node.js & Express.js** - Server-side runtime and framework
+- **Ethers.js (v6)** - Blockchain interaction
+- **Better-SQLite3** - High-performance local database
+- **Multer** - Middleware for handling `multipart/form-data`
+- **PDF-Lib** - PDF generation and manipulation
+- **QRCode** - 2D barcode generation
+- **JWT (JSON Web Tokens)** - Secure authentication
+- **Bcryptjs** - Password hashing
+- **Helmet** - Security headers
+- **Express Validator** - Request data validation
+- **Express Rate Limit** - Brute-force protection
 
 ### Blockchain
-- Ethereum (Sepolia Testnet)
-- Hardhat development environment
-- Ethers.js for blockchain interaction
-- Smart contract for certificate management
+- **Solidity** - Smart contract programming language
+- **Hardhat** - Ethereum development environment
+- **OpenZeppelin Contracts** - Standardized, secure smart contracts
+- **TypeScript** - Type-safe development
+- **TypeChain** - TypeScript bindings for Ethereum smart contracts
+- **Chai** - BDD / TDD assertion library
 
 ## 📋 Prerequisites
 
