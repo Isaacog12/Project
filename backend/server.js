@@ -553,13 +553,13 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
     const stampFontSize = 12;
     const stampTextWidth = helveticaBold.widthOfTextAtSize(stampText, stampFontSize);
 
-    // Blue badge at bottom
+    // Black badge at bottom
     page.drawRectangle({
         x: width / 2 - stampTextWidth / 2 - 10,
         y: 20,
         width: stampTextWidth + 20,
         height: 25,
-        color: rgb(0.1, 0.3, 0.5),
+        color: rgb(0, 0, 0),
     });
 
     page.drawText(stampText, {

@@ -41,7 +41,7 @@
 
 body {
   font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
-  background: linear-gradient(135deg, #0c1929 0%, #1a365d 50%, #0f2744 100%);
+  background: linear-gradient(135deg, #000000 0%, #0a0a0a 50%, #111111 100%);
   background-attachment: fixed;
   color: var(--text-primary);
   min-height: 100vh;
