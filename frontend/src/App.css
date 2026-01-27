@@ -82,19 +82,8 @@ body::before {
     radial-gradient(circle at 50% 50%, rgba(99, 102, 241, 0.08) 0%, transparent 70%);
   pointer-events: none;
   z-index: -1;
-  animation: bgPulse 15s ease-in-out infinite;
-}
-
-@keyframes bgPulse {
-
-  0%,
-  100% {
-    opacity: 1;
-  }
-
-  50% {
-    opacity: 0.7;
-  }
+  /* Animation removed for performance */
+  /* animation: bgPulse 15s ease-in-out infinite; */
 }
 
 /* ============================================ */
@@ -161,8 +150,8 @@ header p {
   padding: 8px;
   border-radius: 20px;
   border: 1px solid var(--glass-border);
-  backdrop-filter: blur(20px);
-  -webkit-backdrop-filter: blur(20px);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   box-shadow:
     0 8px 32px var(--glass-shadow),
     inset 0 1px 0 rgba(255, 255, 255, 0.1);
@@ -235,31 +224,19 @@ header p {
 
 .container {
   background: var(--glass-bg);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
   border: 1px solid var(--glass-border);
   border-radius: 28px;
   padding: 48px;
   box-shadow:
     0 25px 50px -12px var(--glass-shadow),
-    0 0 100px rgba(59, 130, 246, 0.1),
-    inset 0 1px 0 rgba(255, 255, 255, 0.1),
-    inset 0 0 80px rgba(59, 130, 246, 0.03);
-  animation: fadeInUp 0.8s ease-out 0.4s both, floatContainer 6s ease-in-out infinite;
+    0 0 100px rgba(59, 130, 246, 0.05);
+  /* Reduced shadow intensity */
+  animation: fadeInUp 0.8s ease-out 0.4s both;
+  /* Removed floatContainer */
   position: relative;
   overflow: hidden;
-}
-
-@keyframes floatContainer {
-
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-
-  50% {
-    transform: translateY(-5px);
-  }
 }
 
 .container::before {
@@ -269,20 +246,8 @@ header p {
   left: 0;
   right: 0;
   height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(255, 255, 255, 0.3), transparent);
-  animation: shimmerBorder 3s ease-in-out infinite;
-}
-
-@keyframes shimmerBorder {
-
-  0%,
-  100% {
-    opacity: 0.5;
-  }
-
-  50% {
-    opacity: 1;
-  }
+  background: rgba(255, 255, 255, 0.1);
+  /* Animation removed */
 }
 
 /* ============================================ */
@@ -344,31 +309,9 @@ input:hover {
 input:focus {
   outline: none;
   border-color: var(--primary);
-  background: rgba(15, 23, 42, 0.7);
-  box-shadow:
-    0 0 0 4px rgba(59, 130, 246, 0.15),
-    0 0 30px rgba(59, 130, 246, 0.2),
-    0 4px 12px rgba(0, 0, 0, 0.1);
-  transform: translateY(-2px) scale(1.01);
-  animation: inputPulse 2s ease-in-out infinite;
-}
-
-@keyframes inputPulse {
-
-  0%,
-  100% {
-    box-shadow:
-      0 0 0 4px rgba(59, 130, 246, 0.15),
-      0 0 30px rgba(59, 130, 246, 0.2),
-      0 4px 12px rgba(0, 0, 0, 0.1);
-  }
-
-  50% {
-    box-shadow:
-      0 0 0 4px rgba(59, 130, 246, 0.25),
-      0 0 40px rgba(59, 130, 246, 0.3),
-      0 4px 12px rgba(0, 0, 0, 0.1);
-  }
+  background: rgba(15, 23, 42, 0.8);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.3);
+  transform: translateY(-1px);
 }
 
 /* ============================================ */
@@ -469,7 +412,7 @@ button[type="submit"]:disabled {
   border-radius: 18px;
   padding: 28px;
   margin-top: 28px;
-  backdrop-filter: blur(12px);
+  backdrop-filter: blur(10px);
   animation: slideUp 0.4s ease-out;
   border: 1px solid;
 }
@@ -518,8 +461,8 @@ button[type="submit"]:disabled {
   border-radius: 20px;
   padding: 40px 32px;
   margin-top: 28px;
-  backdrop-filter: blur(16px);
-  -webkit-backdrop-filter: blur(16px);
+  backdrop-filter: blur(10px);
+  -webkit-backdrop-filter: blur(10px);
   animation: slideUp 0.5s ease-out;
   border: 1px solid;
   position: relative;
