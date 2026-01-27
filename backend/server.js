@@ -213,25 +213,26 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
 
     // Randomly select logo (1 or 2)
     const logoNumber = Math.random() < 0.5 ? 1 : 2;
-    const logoPath = path.join(__dirname, 'assets', `logo${logoNumber}.jpg`);
 
     // Add subtle logo watermark as background
     try {
-        const logoBytes = fs.readFileSync(logoPath);
-        const logoImage = await pdfDoc.embedJpg(logoBytes);
-        const logoAspectRatio = logoImage.width / logoImage.height;
-        const targetHeight = height * 0.5;
-        const targetWidth = targetHeight * logoAspectRatio;
+        const logoBytes = logoBuffers[logoNumber];
+        if (logoBytes) {
+            const logoImage = await pdfDoc.embedJpg(logoBytes);
+            const logoAspectRatio = logoImage.width / logoImage.height;
+            const targetHeight = height * 0.5;
+            const targetWidth = targetHeight * logoAspectRatio;
 
-        page.drawImage(logoImage, {
-            x: width / 2 - targetWidth / 2,
-            y: height / 2 - targetHeight / 2,
-            width: targetWidth,
-            height: targetHeight,
-            opacity: 0.03,
-        });
+            page.drawImage(logoImage, {
+                x: width / 2 - targetWidth / 2,
+                y: height / 2 - targetHeight / 2,
+                width: targetWidth,
+                height: targetHeight,
+                opacity: 0.03,
+            });
+        }
     } catch (error) {
-        console.error('Error loading logo watermark:', error.message);
+        console.error('Error adding logo watermark:', error.message);
     }
 
     // === DECORATIVE BORDER SYSTEM ===
@@ -290,18 +291,20 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
     // === HEADER SECTION ===
     // University logo at top center
     try {
-        const logoBytes = fs.readFileSync(logoPath);
-        const logoImage = await pdfDoc.embedJpg(logoBytes);
-        const logoAspectRatio = logoImage.width / logoImage.height;
-        const logoHeight = 60;
-        const logoWidth = logoHeight * logoAspectRatio;
+        const logoBytes = logoBuffers[logoNumber];
+        if (logoBytes) {
+            const logoImage = await pdfDoc.embedJpg(logoBytes);
+            const logoAspectRatio = logoImage.width / logoImage.height;
+            const logoHeight = 60;
+            const logoWidth = logoHeight * logoAspectRatio;
 
-        page.drawImage(logoImage, {
-            x: width / 2 - logoWidth / 2,
-            y: height - 110,
-            width: logoWidth,
-            height: logoHeight,
-        });
+            page.drawImage(logoImage, {
+                x: width / 2 - logoWidth / 2,
+                y: height - 110,
+                width: logoWidth,
+                height: logoHeight,
+            });
+        }
     } catch (error) {
         console.error('Error adding header logo:', error.message);
     }

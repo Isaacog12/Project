@@ -222,143 +222,18 @@ function PublicVerifyPage() {
 // MAIN APP COMPONENT
 // ============================================
 
-function MainApp() {
-  const navigate = useNavigate();
-  const [activeTab, setActiveTab] = useState('issue');
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [adminToken, setAdminToken] = useState(localStorage.getItem('adminToken'));
+// ============================================
+// ISSUE CERTIFICATE COMPONENT
+// ============================================
 
-  // Issue Certificate
+function IssueForm() {
   const [studentName, setStudentName] = useState('');
   const [course, setCourse] = useState('');
   const [grade, setGrade] = useState('');
   const [document, setDocument] = useState(null);
   const [issueResult, setIssueResult] = useState(null);
   const [issueLoading, setIssueLoading] = useState(false);
-
-  // Verify Certificate
-  const [certId, setCertId] = useState('');
-  const [verifyResult, setVerifyResult] = useState(null);
-  const [verifyLoading, setVerifyLoading] = useState(false);
-  const [downloadLoading, setDownloadLoading] = useState({ doc: false, pdf: false });
-
-  // Admin
-  const [adminUsername, setAdminUsername] = useState('');
-  const [adminPassword, setAdminPassword] = useState('');
-  const [loginError, setLoginError] = useState('');
-  const [loginLoading, setLoginLoading] = useState(false);
-  const [certificates, setCertificates] = useState([]);
-  const [adminLoading, setAdminLoading] = useState(false);
-  const [stats, setStats] = useState(null);
-  const [actionLoading, setActionLoading] = useState({});
-  const [searchQuery, setSearchQuery] = useState('');
-
-  useEffect(() => {
-    if (adminToken) {
-      verifyToken();
-    }
-  }, []);
-
-  const verifyToken = async () => {
-    try {
-      await axios.get(`${API_URL}/auth/verify`, {
-        headers: { Authorization: `Bearer ${adminToken}` }
-      });
-      setIsAdmin(true);
-    } catch (error) {
-      localStorage.removeItem('adminToken');
-      setAdminToken(null);
-      setIsAdmin(false);
-    }
-  };
-
-  const handleAdminLogin = async (e) => {
-    e.preventDefault();
-    setLoginLoading(true);
-    setLoginError('');
-
-    try {
-      const response = await axios.post(`${API_URL}/auth/login`, {
-        username: adminUsername,
-        password: adminPassword
-      });
-
-      const { token } = response.data;
-      localStorage.setItem('adminToken', token);
-      setAdminToken(token);
-      setIsAdmin(true);
-      setAdminUsername('');
-      setAdminPassword('');
-      loadAdminData(token);
-    } catch (error) {
-      setLoginError(error.response?.data?.error || 'Login failed');
-    } finally {
-      setLoginLoading(false);
-    }
-  };
-
-  const handleLogout = () => {
-    localStorage.removeItem('adminToken');
-    setAdminToken(null);
-    setIsAdmin(false);
-    setCertificates([]);
-    setStats(null);
-    setActiveTab('issue');
-  };
-
-  const loadAdminData = async (token = adminToken) => {
-    setAdminLoading(true);
-    try {
-      const [certsResponse, statsResponse] = await Promise.all([
-        axios.get(`${API_URL}/admin/certificates`, {
-          headers: { Authorization: `Bearer ${token}` }
-        }),
-        axios.get(`${API_URL}/admin/stats`, {
-          headers: { Authorization: `Bearer ${token}` }
-        })
-      ]);
-      setCertificates(certsResponse.data);
-      setStats(statsResponse.data);
-    } catch (error) {
-      console.error('Failed to load admin data:', error);
-    } finally {
-      setAdminLoading(false);
-    }
-  };
-
-  const handleRevoke = async (certId) => {
-    if (!window.confirm(`Are you sure you want to revoke certificate ${certId}?`)) return;
-
-    setActionLoading(prev => ({ ...prev, [certId]: 'revoking' }));
-    try {
-      await axios.post(`${API_URL}/admin/certificates/${certId}/revoke`, {}, {
-        headers: { Authorization: `Bearer ${adminToken}` }
-      });
-      alert('Certificate revoked successfully');
-      loadAdminData();
-    } catch (error) {
-      alert(error.response?.data?.error || 'Failed to revoke certificate');
-    } finally {
-      setActionLoading(prev => ({ ...prev, [certId]: null }));
-    }
-  };
-
-  const handleDelete = async (certId) => {
-    if (!window.confirm(`Delete certificate ${certId} from database?`)) return;
-
-    setActionLoading(prev => ({ ...prev, [certId]: 'deleting' }));
-    try {
-      await axios.delete(`${API_URL}/admin/certificates/${certId}`, {
-        headers: { Authorization: `Bearer ${adminToken}` }
-      });
-      alert('Certificate deleted');
-      loadAdminData();
-    } catch (error) {
-      alert(error.response?.data?.error || 'Failed to delete certificate');
-    } finally {
-      setActionLoading(prev => ({ ...prev, [certId]: null }));
-    }
-  };
+  const navigate = useNavigate();
 
   const handleIssue = async (e) => {
     e.preventDefault();
@@ -389,6 +264,94 @@ function MainApp() {
       setIssueLoading(false);
     }
   };
+
+  const goToPublicVerify = (id) => {
+    navigate(`/verify/${id}`);
+  };
+
+  return (
+    <div className="section">
+      <h2>Issue New Certificate</h2>
+      <form onSubmit={handleIssue}>
+        <input type="text" placeholder="Student Name" value={studentName} onChange={(e) => setStudentName(e.target.value)} required />
+        <input type="text" placeholder="Course (e.g., Computer Science)" value={course} onChange={(e) => setCourse(e.target.value)} required />
+        <input type="number" placeholder="Grade (e.g., 5.0)" value={grade} onChange={(e) => setGrade(e.target.value)} required />
+        <div className="file-upload">
+          <label htmlFor="document-input" className="file-label">
+            📄 {document ? document.name : 'Attach Document (PDF)'}
+          </label>
+          <input id="document-input" type="file" accept=".pdf" onChange={(e) => setDocument(e.target.files[0])} className="file-input" />
+        </div>
+        <button type="submit" disabled={issueLoading}>
+          {issueLoading ? 'Issuing...' : 'Issue Certificate'}
+        </button>
+      </form>
+
+      {issueResult && (
+        <div className={`result ${issueResult.error ? 'error' : 'success'}`}>
+          {issueResult.error ? (
+            <PremiumError
+              type={issueResult.error.includes('timeout') || issueResult.error.includes('TIMEOUT') ? 'timeout' : issueResult.error.includes('network') || issueResult.error.includes('connect') ? 'network' : 'error'}
+              title="Failed to Issue Certificate"
+              message={issueResult.error}
+              action={
+                <button className="retry-btn" onClick={() => setIssueResult(null)}>
+                  ← Try Again
+                </button>
+              }
+            />
+          ) : (
+            <div className="issue-success">
+              <div className="success-header">
+                <div className="big-icon">✅</div>
+                <h3>Certificate Issued Successfully!</h3>
+              </div>
+
+              <div className="issue-details">
+                <div className="detail-row">
+                  <label>Certificate ID</label>
+                  <span className="cert-id-value">{issueResult.certId}</span>
+                </div>
+
+                {issueResult.qrCode && (
+                  <div className="qr-section">
+                    <img src={issueResult.qrCode} alt="QR Code" className="qr-code" />
+                    <p className="qr-label">Scan to verify</p>
+                  </div>
+                )}
+
+                <div className="issue-actions">
+                  <button className="action-link" onClick={() => goToPublicVerify(issueResult.certId)}>
+                    🔗 Open Verification Page
+                  </button>
+                  <button className="action-link secondary" onClick={() => {
+                    navigator.clipboard.writeText(issueResult.verifyUrl || `${window.location.origin}/verify/${issueResult.certId}`);
+                    alert('Link copied!');
+                  }}>
+                    📋 Copy Link
+                  </button>
+                </div>
+              </div>
+
+              {issueResult.hasDocument && <p className="note">📄 Document attached and stored</p>}
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================
+// VERIFY CERTIFICATE COMPONENT
+// ============================================
+
+function VerifyForm() {
+  const [certId, setCertId] = useState('');
+  const [verifyResult, setVerifyResult] = useState(null);
+  const [verifyLoading, setVerifyLoading] = useState(false);
+  const [downloadLoading, setDownloadLoading] = useState({ doc: false, pdf: false });
+  const navigate = useNavigate();
 
   const handleVerify = async (e) => {
     e.preventDefault();
@@ -451,11 +414,205 @@ function MainApp() {
     navigate(`/verify/${id}`);
   };
 
+  return (
+    <div className="section">
+      <h2>Verify Certificate</h2>
+      <form onSubmit={handleVerify}>
+        <input type="text" placeholder="Enter Certificate ID" value={certId} onChange={(e) => setCertId(e.target.value)} required />
+        <button type="submit" disabled={verifyLoading}>
+          {verifyLoading ? 'Verifying...' : 'Verify Certificate'}
+        </button>
+      </form>
+
+      {verifyResult && (
+        <div className={`result ${verifyResult.error ? 'error' : (verifyResult.exists && !verifyResult.isRevoked) ? 'success' : 'error'}`}>
+          {verifyResult.error ? (
+            <PremiumError
+              type={verifyResult.error.includes('timeout') || verifyResult.error.includes('TIMEOUT') ? 'timeout' : verifyResult.error.includes('network') || verifyResult.error.includes('connect') ? 'network' : 'error'}
+              title="Verification Failed"
+              message={verifyResult.error}
+              action={
+                <button className="retry-btn" onClick={() => setVerifyResult(null)}>
+                  ← Try Again
+                </button>
+              }
+            />
+          ) : !verifyResult.exists ? (
+            <PremiumError
+              type="notFound"
+              title="Certificate Not Found"
+              message="This certificate does not exist on the blockchain."
+            />
+          ) : verifyResult.isRevoked ? (
+            <PremiumError
+              type="revoked"
+              title="Certificate Revoked"
+              message="This certificate has been revoked and is no longer valid."
+            />
+          ) : (
+            <div className="cert-details">
+              <h3>✅ Valid Certificate</h3>
+              <p><strong>Student:</strong> {verifyResult.studentName}</p>
+              <p><strong>Course:</strong> {verifyResult.course}</p>
+              <p><strong>Grade:</strong> {verifyResult.grade}</p>
+              <p><strong>Issue Date:</strong> {new Date(verifyResult.issueDate * 1000).toLocaleDateString()}</p>
+
+              {verifyResult.qrCode && (
+                <div className="qr-section inline">
+                  <img src={verifyResult.qrCode} alt="QR Code" className="qr-code small" />
+                </div>
+              )}
+
+              <div className="download-actions">
+                <button className="download-btn" onClick={handleDownloadPDF} disabled={downloadLoading.pdf}>
+                  {downloadLoading.pdf ? '⏳ Generating...' : '📜 Download Certificate PDF'}
+                </button>
+                {verifyResult.hasDocument && (
+                  <button className="download-btn secondary" onClick={handleDownloadDoc} disabled={downloadLoading.doc}>
+                    {downloadLoading.doc ? '⏳ Downloading...' : '📄 Download Stamped Document'}
+                  </button>
+                )}
+              </div>
+
+              <button className="action-link" onClick={() => goToPublicVerify(certId)}>
+                🔗 Open Public Verification Page
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============================================
+// ADMIN DASHBOARD COMPONENT
+// ============================================
+
+function AdminDashboard() {
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminToken, setAdminToken] = useState(localStorage.getItem('adminToken'));
+  const [adminUsername, setAdminUsername] = useState('');
+  const [adminPassword, setAdminPassword] = useState('');
+  const [loginError, setLoginError] = useState('');
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [certificates, setCertificates] = useState([]);
+  const [adminLoading, setAdminLoading] = useState(false);
+  const [stats, setStats] = useState(null);
+  const [actionLoading, setActionLoading] = useState({});
+  const [searchQuery, setSearchQuery] = useState('');
+  const navigate = useNavigate();
+
   useEffect(() => {
-    if (activeTab === 'admin' && isAdmin) {
-      loadAdminData();
+    if (adminToken) {
+      verifyToken();
     }
-  }, [activeTab, isAdmin]);
+  }, []);
+
+  const verifyToken = async () => {
+    try {
+      await axios.get(`${API_URL}/auth/verify`, {
+        headers: { Authorization: `Bearer ${adminToken}` }
+      });
+      setIsAdmin(true);
+      loadAdminData(adminToken);
+    } catch (error) {
+      localStorage.removeItem('adminToken');
+      setAdminToken(null);
+      setIsAdmin(false);
+    }
+  };
+
+  const loadAdminData = async (token = adminToken) => {
+    setAdminLoading(true);
+    try {
+      const [certsResponse, statsResponse] = await Promise.all([
+        axios.get(`${API_URL}/admin/certificates`, {
+          headers: { Authorization: `Bearer ${token}` }
+        }),
+        axios.get(`${API_URL}/admin/stats`, {
+          headers: { Authorization: `Bearer ${token}` }
+        })
+      ]);
+      setCertificates(certsResponse.data);
+      setStats(statsResponse.data);
+    } catch (error) {
+      console.error('Failed to load admin data:', error);
+    } finally {
+      setAdminLoading(false);
+    }
+  };
+
+  const handleAdminLogin = async (e) => {
+    e.preventDefault();
+    setLoginLoading(true);
+    setLoginError('');
+
+    try {
+      const response = await axios.post(`${API_URL}/auth/login`, {
+        username: adminUsername,
+        password: adminPassword
+      });
+
+      const { token } = response.data;
+      localStorage.setItem('adminToken', token);
+      setAdminToken(token);
+      setIsAdmin(true);
+      setAdminUsername('');
+      setAdminPassword('');
+      loadAdminData(token);
+    } catch (error) {
+      setLoginError(error.response?.data?.error || 'Login failed');
+    } finally {
+      setLoginLoading(false);
+    }
+  };
+
+  const handleLogout = () => {
+    localStorage.removeItem('adminToken');
+    setAdminToken(null);
+    setIsAdmin(false);
+    setCertificates([]);
+    setStats(null);
+  };
+
+  const handleRevoke = async (certId) => {
+    if (!window.confirm(`Are you sure you want to revoke certificate ${certId}?`)) return;
+
+    setActionLoading(prev => ({ ...prev, [certId]: 'revoking' }));
+    try {
+      await axios.post(`${API_URL}/admin/certificates/${certId}/revoke`, {}, {
+        headers: { Authorization: `Bearer ${adminToken}` }
+      });
+      alert('Certificate revoked successfully');
+      loadAdminData();
+    } catch (error) {
+      alert(error.response?.data?.error || 'Failed to revoke certificate');
+    } finally {
+      setActionLoading(prev => ({ ...prev, [certId]: null }));
+    }
+  };
+
+  const handleDelete = async (certId) => {
+    if (!window.confirm(`Delete certificate ${certId} from database?`)) return;
+
+    setActionLoading(prev => ({ ...prev, [certId]: 'deleting' }));
+    try {
+      await axios.delete(`${API_URL}/admin/certificates/${certId}`, {
+        headers: { Authorization: `Bearer ${adminToken}` }
+      });
+      alert('Certificate deleted');
+      loadAdminData();
+    } catch (error) {
+      alert(error.response?.data?.error || 'Failed to delete certificate');
+    } finally {
+      setActionLoading(prev => ({ ...prev, [certId]: null }));
+    }
+  };
+
+  const goToPublicVerify = (id) => {
+    navigate(`/verify/${id}`);
+  };
 
   // Filter certificates based on search query
   const filteredCertificates = certificates.filter(cert => {
@@ -472,6 +629,137 @@ function MainApp() {
       grade.includes(query) ||
       certId.includes(query);
   });
+
+  return (
+    <div className="section">
+      {!isAdmin ? (
+        <>
+          <h2>🔐 Admin Login</h2>
+          <form onSubmit={handleAdminLogin}>
+            <input type="text" placeholder="Username" value={adminUsername} onChange={(e) => setAdminUsername(e.target.value)} required />
+            <input type="password" placeholder="Password" value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} required />
+            <button type="submit" disabled={loginLoading}>
+              {loginLoading ? 'Logging in...' : 'Login'}
+            </button>
+          </form>
+          {loginError && <div className="result error"><p>❌ {loginError}</p></div>}
+        </>
+      ) : (
+        <>
+          <div className="admin-header">
+            <h2>📊 Admin Dashboard</h2>
+            <button className="logout-btn" onClick={handleLogout}>Logout</button>
+          </div>
+
+          {stats && (
+            <div className="stats-grid">
+              <div className="stat-card">
+                <span className="stat-number">{stats.totalCertificates}</span>
+                <span className="stat-label">Total</span>
+              </div>
+              <div className="stat-card valid">
+                <span className="stat-number">{stats.validCertificates}</span>
+                <span className="stat-label">Valid</span>
+              </div>
+              <div className="stat-card revoked">
+                <span className="stat-number">{stats.revokedCertificates}</span>
+                <span className="stat-label">Revoked</span>
+              </div>
+              <div className="stat-card">
+                <span className="stat-number">{stats.documentsUploaded}</span>
+                <span className="stat-label">Documents</span>
+              </div>
+            </div>
+          )}
+
+          {/* Search Bar */}
+          <div className="search-container">
+            <div className="search-bar">
+              <input
+                type="text"
+                className="search-input"
+                placeholder="🔍 Search by student name, certificate ID, course, or grade..."
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+              />
+              {searchQuery && (
+                <button
+                  className="clear-search-btn"
+                  onClick={() => setSearchQuery('')}
+                  title="Clear search"
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            {searchQuery && (
+              <p className="search-results-count">
+                Found {filteredCertificates.length} of {certificates.length} certificates
+              </p>
+            )}
+          </div>
+
+          <h3>All Certificates</h3>
+          {adminLoading ? (
+            <p className="loading">Loading...</p>
+          ) : filteredCertificates.length === 0 ? (
+            <p className="no-data">
+              {searchQuery ? `No certificates match "${searchQuery}"` : 'No certificates found'}
+            </p>
+          ) : (
+            <div className="certificates-table">
+              <table>
+                <thead>
+                  <tr>
+                    <th>ID</th>
+                    <th>Student</th>
+                    <th>Course</th>
+                    <th>Grade</th>
+                    <th>Status</th>
+                    <th>Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredCertificates.map((cert) => (
+                    <tr key={cert.certId} className={cert.blockchainData?.isRevoked ? 'revoked-row' : ''}>
+                      <td className="cert-id">{cert.certId}</td>
+                      <td>{cert.blockchainData?.studentName || cert.studentName}</td>
+                      <td>{cert.blockchainData?.course || cert.course}</td>
+                      <td>{cert.blockchainData?.grade || cert.grade}</td>
+                      <td>
+                        <span className={`status-badge ${cert.blockchainData?.isRevoked ? 'revoked' : 'valid'}`}>
+                          {cert.blockchainData?.isRevoked ? '❌ Revoked' : '✅ Valid'}
+                        </span>
+                      </td>
+                      <td className="actions">
+                        <button className="action-btn view" onClick={() => goToPublicVerify(cert.certId)}>👁️</button>
+                        {!cert.blockchainData?.isRevoked && (
+                          <button className="action-btn revoke" onClick={() => handleRevoke(cert.certId)} disabled={actionLoading[cert.certId]}>
+                            {actionLoading[cert.certId] === 'revoking' ? '...' : '🚫'}
+                          </button>
+                        )}
+                        <button className="action-btn delete" onClick={() => handleDelete(cert.certId)} disabled={actionLoading[cert.certId]}>
+                          {actionLoading[cert.certId] === 'deleting' ? '...' : '🗑️'}
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ============================================
+// MAIN APP COMPONENT
+// ============================================
+
+function MainApp() {
+  const [activeTab, setActiveTab] = useState('issue');
 
   return (
     <div className="App">
@@ -493,270 +781,9 @@ function MainApp() {
       </div>
 
       <div className="container">
-        {activeTab === 'issue' && (
-          <div className="section">
-            <h2>Issue New Certificate</h2>
-            <form onSubmit={handleIssue}>
-              <input type="text" placeholder="Student Name" value={studentName} onChange={(e) => setStudentName(e.target.value)} required />
-              <input type="text" placeholder="Course (e.g., Computer Science)" value={course} onChange={(e) => setCourse(e.target.value)} required />
-              <input type="number" placeholder="Grade (e.g., 5.0)" value={grade} onChange={(e) => setGrade(e.target.value)} required />
-              <div className="file-upload">
-                <label htmlFor="document-input" className="file-label">
-                  📄 {document ? document.name : 'Attach Document (PDF)'}
-                </label>
-                <input id="document-input" type="file" accept=".pdf" onChange={(e) => setDocument(e.target.files[0])} className="file-input" />
-              </div>
-              <button type="submit" disabled={issueLoading}>
-                {issueLoading ? 'Issuing...' : 'Issue Certificate'}
-              </button>
-            </form>
-
-            {issueResult && (
-              <div className={`result ${issueResult.error ? 'error' : 'success'}`}>
-                {issueResult.error ? (
-                  <PremiumError
-                    type={issueResult.error.includes('timeout') || issueResult.error.includes('TIMEOUT') ? 'timeout' : issueResult.error.includes('network') || issueResult.error.includes('connect') ? 'network' : 'error'}
-                    title="Failed to Issue Certificate"
-                    message={issueResult.error}
-                    action={
-                      <button className="retry-btn" onClick={() => setIssueResult(null)}>
-                        ← Try Again
-                      </button>
-                    }
-                  />
-                ) : (
-                  <div className="issue-success">
-                    <div className="success-header">
-                      <div className="big-icon">✅</div>
-                      <h3>Certificate Issued Successfully!</h3>
-                    </div>
-
-                    <div className="issue-details">
-                      <div className="detail-row">
-                        <label>Certificate ID</label>
-                        <span className="cert-id-value">{issueResult.certId}</span>
-                      </div>
-
-                      {issueResult.qrCode && (
-                        <div className="qr-section">
-                          <img src={issueResult.qrCode} alt="QR Code" className="qr-code" />
-                          <p className="qr-label">Scan to verify</p>
-                        </div>
-                      )}
-
-                      <div className="issue-actions">
-                        <button className="action-link" onClick={() => goToPublicVerify(issueResult.certId)}>
-                          🔗 Open Verification Page
-                        </button>
-                        <button className="action-link secondary" onClick={() => {
-                          navigator.clipboard.writeText(issueResult.verifyUrl || `${window.location.origin}/verify/${issueResult.certId}`);
-                          alert('Link copied!');
-                        }}>
-                          📋 Copy Link
-                        </button>
-                      </div>
-                    </div>
-
-                    {issueResult.hasDocument && <p className="note">📄 Document attached and stored</p>}
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeTab === 'verify' && (
-          <div className="section">
-            <h2>Verify Certificate</h2>
-            <form onSubmit={handleVerify}>
-              <input type="text" placeholder="Enter Certificate ID" value={certId} onChange={(e) => setCertId(e.target.value)} required />
-              <button type="submit" disabled={verifyLoading}>
-                {verifyLoading ? 'Verifying...' : 'Verify Certificate'}
-              </button>
-            </form>
-
-            {verifyResult && (
-              <div className={`result ${verifyResult.error ? 'error' : (verifyResult.exists && !verifyResult.isRevoked) ? 'success' : 'error'}`}>
-                {verifyResult.error ? (
-                  <PremiumError
-                    type={verifyResult.error.includes('timeout') || verifyResult.error.includes('TIMEOUT') ? 'timeout' : verifyResult.error.includes('network') || verifyResult.error.includes('connect') ? 'network' : 'error'}
-                    title="Verification Failed"
-                    message={verifyResult.error}
-                    action={
-                      <button className="retry-btn" onClick={() => setVerifyResult(null)}>
-                        ← Try Again
-                      </button>
-                    }
-                  />
-                ) : !verifyResult.exists ? (
-                  <PremiumError
-                    type="notFound"
-                    title="Certificate Not Found"
-                    message="This certificate does not exist on the blockchain."
-                  />
-                ) : verifyResult.isRevoked ? (
-                  <PremiumError
-                    type="revoked"
-                    title="Certificate Revoked"
-                    message="This certificate has been revoked and is no longer valid."
-                  />
-                ) : (
-                  <div className="cert-details">
-                    <h3>✅ Valid Certificate</h3>
-                    <p><strong>Student:</strong> {verifyResult.studentName}</p>
-                    <p><strong>Course:</strong> {verifyResult.course}</p>
-                    <p><strong>Grade:</strong> {verifyResult.grade}</p>
-                    <p><strong>Issue Date:</strong> {new Date(verifyResult.issueDate * 1000).toLocaleDateString()}</p>
-
-                    {verifyResult.qrCode && (
-                      <div className="qr-section inline">
-                        <img src={verifyResult.qrCode} alt="QR Code" className="qr-code small" />
-                      </div>
-                    )}
-
-                    <div className="download-actions">
-                      <button className="download-btn" onClick={handleDownloadPDF} disabled={downloadLoading.pdf}>
-                        {downloadLoading.pdf ? '⏳ Generating...' : '📜 Download Certificate PDF'}
-                      </button>
-                      {verifyResult.hasDocument && (
-                        <button className="download-btn secondary" onClick={handleDownloadDoc} disabled={downloadLoading.doc}>
-                          {downloadLoading.doc ? '⏳ Downloading...' : '📄 Download Stamped Document'}
-                        </button>
-                      )}
-                    </div>
-
-                    <button className="action-link" onClick={() => goToPublicVerify(certId)}>
-                      🔗 Open Public Verification Page
-                    </button>
-                  </div>
-                )}
-              </div>
-            )}
-          </div>
-        )}
-
-        {activeTab === 'admin' && (
-          <div className="section">
-            {!isAdmin ? (
-              <>
-                <h2>🔐 Admin Login</h2>
-                <form onSubmit={handleAdminLogin}>
-                  <input type="text" placeholder="Username" value={adminUsername} onChange={(e) => setAdminUsername(e.target.value)} required />
-                  <input type="password" placeholder="Password" value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} required />
-                  <button type="submit" disabled={loginLoading}>
-                    {loginLoading ? 'Logging in...' : 'Login'}
-                  </button>
-                </form>
-                {loginError && <div className="result error"><p>❌ {loginError}</p></div>}
-              </>
-            ) : (
-              <>
-                <div className="admin-header">
-                  <h2>📊 Admin Dashboard</h2>
-                  <button className="logout-btn" onClick={handleLogout}>Logout</button>
-                </div>
-
-                {stats && (
-                  <div className="stats-grid">
-                    <div className="stat-card">
-                      <span className="stat-number">{stats.totalCertificates}</span>
-                      <span className="stat-label">Total</span>
-                    </div>
-                    <div className="stat-card valid">
-                      <span className="stat-number">{stats.validCertificates}</span>
-                      <span className="stat-label">Valid</span>
-                    </div>
-                    <div className="stat-card revoked">
-                      <span className="stat-number">{stats.revokedCertificates}</span>
-                      <span className="stat-label">Revoked</span>
-                    </div>
-                    <div className="stat-card">
-                      <span className="stat-number">{stats.documentsUploaded}</span>
-                      <span className="stat-label">Documents</span>
-                    </div>
-                  </div>
-                )}
-
-                {/* Search Bar */}
-                <div className="search-container">
-                  <div className="search-bar">
-                    <input
-                      type="text"
-                      className="search-input"
-                      placeholder="🔍 Search by student name, certificate ID, course, or grade..."
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                    />
-                    {searchQuery && (
-                      <button
-                        className="clear-search-btn"
-                        onClick={() => setSearchQuery('')}
-                        title="Clear search"
-                      >
-                        ✕
-                      </button>
-                    )}
-                  </div>
-                  {searchQuery && (
-                    <p className="search-results-count">
-                      Found {filteredCertificates.length} of {certificates.length} certificates
-                    </p>
-                  )}
-                </div>
-
-                <h3>All Certificates</h3>
-                {adminLoading ? (
-                  <p className="loading">Loading...</p>
-                ) : filteredCertificates.length === 0 ? (
-                  <p className="no-data">
-                    {searchQuery ? `No certificates match "${searchQuery}"` : 'No certificates found'}
-                  </p>
-                ) : (
-                  <div className="certificates-table">
-                    <table>
-                      <thead>
-                        <tr>
-                          <th>ID</th>
-                          <th>Student</th>
-                          <th>Course</th>
-                          <th>Grade</th>
-                          <th>Status</th>
-                          <th>Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {filteredCertificates.map((cert) => (
-                          <tr key={cert.certId} className={cert.blockchainData?.isRevoked ? 'revoked-row' : ''}>
-                            <td className="cert-id">{cert.certId}</td>
-                            <td>{cert.blockchainData?.studentName || cert.studentName}</td>
-                            <td>{cert.blockchainData?.course || cert.course}</td>
-                            <td>{cert.blockchainData?.grade || cert.grade}</td>
-                            <td>
-                              <span className={`status-badge ${cert.blockchainData?.isRevoked ? 'revoked' : 'valid'}`}>
-                                {cert.blockchainData?.isRevoked ? '❌ Revoked' : '✅ Valid'}
-                              </span>
-                            </td>
-                            <td className="actions">
-                              <button className="action-btn view" onClick={() => goToPublicVerify(cert.certId)}>👁️</button>
-                              {!cert.blockchainData?.isRevoked && (
-                                <button className="action-btn revoke" onClick={() => handleRevoke(cert.certId)} disabled={actionLoading[cert.certId]}>
-                                  {actionLoading[cert.certId] === 'revoking' ? '...' : '🚫'}
-                                </button>
-                              )}
-                              <button className="action-btn delete" onClick={() => handleDelete(cert.certId)} disabled={actionLoading[cert.certId]}>
-                                {actionLoading[cert.certId] === 'deleting' ? '...' : '🗑️'}
-                              </button>
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </>
-            )}
-          </div>
-        )}
+        {activeTab === 'issue' && <IssueForm />}
+        {activeTab === 'verify' && <VerifyForm />}
+        {activeTab === 'admin' && <AdminDashboard />}
       </div>
     </div>
   );
