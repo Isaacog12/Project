@@ -153,15 +153,17 @@ const upload = multer({
 // BLOCKCHAIN SETUP
 // ============================================
 
+const fetchReq = new ethers.FetchRequest(process.env.RPC_URL);
+fetchReq.timeout = 120000; // 120 seconds timeout to handle slow blockchain responses
+
 const provider = new ethers.JsonRpcProvider(
-    process.env.RPC_URL,
+    fetchReq,
     {
         name: 'sepolia',
         chainId: 11155111
     },
     {
-        staticNetwork: true,
-        timeout: 60000 // 60 seconds timeout
+        staticNetwork: true
     }
 );
 const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
@@ -177,6 +179,32 @@ const contract = new ethers.Contract(
     CONTRACT_ABI,
     wallet
 );
+
+// ============================================
+// ASSET PRELOADING
+// ============================================
+
+const logoBuffers = {};
+try {
+    const assetsDir = path.join(__dirname, 'assets');
+    if (fs.existsSync(assetsDir)) {
+        try {
+            if (fs.existsSync(path.join(assetsDir, 'logo1.jpg'))) {
+                logoBuffers[1] = fs.readFileSync(path.join(assetsDir, 'logo1.jpg'));
+            }
+            if (fs.existsSync(path.join(assetsDir, 'logo2.jpg'))) {
+                logoBuffers[2] = fs.readFileSync(path.join(assetsDir, 'logo2.jpg'));
+            }
+        } catch (e) {
+            console.warn('⚠️ Could not load some logo assets');
+        }
+        console.log('✅ Asset preloading system initialized');
+    } else {
+        console.warn('⚠️ Assets directory not found');
+    }
+} catch (error) {
+    console.error('❌ Error preloading assets:', error.message);
+}
 
 // ============================================
 // HELPER FUNCTIONS

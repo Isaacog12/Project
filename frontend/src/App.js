@@ -37,6 +37,30 @@ function PremiumError({ type = 'error', title, message, icon, action }) {
       </div>
     </div>
   );
+
+}
+
+// ============================================
+// LEGAL MODAL COMPONENT
+// ============================================
+
+function LegalModal({ title, content, onClose }) {
+  return (
+    <div className="modal-overlay" onClick={onClose}>
+      <div className="modal-content" onClick={e => e.stopPropagation()}>
+        <div className="modal-header">
+          <h3>{title}</h3>
+          <button className="close-btn" onClick={onClose}>&times;</button>
+        </div>
+        <div className="modal-body">
+          {content}
+        </div>
+        <div className="modal-footer">
+          <button className="modal-close-btn" onClick={onClose}>Close</button>
+        </div>
+      </div>
+    </div>
+  );
 }
 
 // ============================================
@@ -111,8 +135,11 @@ function PublicVerifyPage() {
   return (
     <div className="App">
       <header>
-        <h1>🎓 Certificate Verification</h1>
-        <p>Blockchain-Verified Educational Certificate</p>
+        <div className="hero-section">
+          <div className="hero-badge">✨ Blockchain Verified Credentials</div>
+          <h1 className="hero-title">Veritas <span className="gradient-text">Secure</span></h1>
+          <p className="hero-subtitle">The gold standard in decentralized academic verification. Immutable, instant, and globally recognized.</p>
+        </div>
       </header>
 
       <div className="container">
@@ -235,6 +262,19 @@ function IssueForm() {
   const [issueLoading, setIssueLoading] = useState(false);
   const navigate = useNavigate();
 
+  const getDegreeClassInfo = (cgpa) => {
+    const score = parseFloat(cgpa);
+    if (isNaN(score)) return null;
+    if (score >= 4.50) return { label: 'First Class Honours', icon: '🏆', color: '#fbbf24' };
+    if (score >= 3.50) return { label: 'Second Class Honours (Upper Division)', icon: '🥈', color: '#e2e8f0' };
+    if (score >= 2.40) return { label: 'Second Class Honours (Lower Division)', icon: '🥉', color: '#94a3b8' };
+    if (score >= 1.50) return { label: 'Third Class Honours', icon: '📜', color: '#d1d5db' };
+    if (score >= 1.00) return { label: 'Pass', icon: '✅', color: '#4ade80' };
+    return { label: 'Fail', icon: '❌', color: '#f87171' };
+  };
+
+  const classInfo = getDegreeClassInfo(grade);
+
   const handleIssue = async (e) => {
     e.preventDefault();
     setIssueLoading(true);
@@ -244,7 +284,11 @@ function IssueForm() {
       const formData = new FormData();
       formData.append('studentName', studentName);
       formData.append('course', course);
-      formData.append('grade', grade);
+      // Send standard format: "First Class Honours (4.50)"
+      const info = getDegreeClassInfo(grade);
+      const formattedGrade = info ? `${info.label} (${grade})` : grade;
+      formData.append('grade', formattedGrade);
+
       if (document) {
         formData.append('document', document);
       }
@@ -273,9 +317,42 @@ function IssueForm() {
     <div className="section">
       <h2>Issue New Certificate</h2>
       <form onSubmit={handleIssue}>
-        <input type="text" placeholder="Student Name" value={studentName} onChange={(e) => setStudentName(e.target.value)} required />
-        <input type="text" placeholder="Course (e.g., Computer Science)" value={course} onChange={(e) => setCourse(e.target.value)} required />
-        <input type="number" placeholder="Grade (e.g., 5.0)" value={grade} onChange={(e) => setGrade(e.target.value)} required />
+        <div className="form-group">
+          <div className="input-wrapper">
+            <span className="input-icon-span">👤</span>
+            <input type="text" placeholder="Student Name" value={studentName} onChange={(e) => setStudentName(e.target.value)} required />
+          </div>
+        </div>
+        <div className="form-group">
+          <div className="input-wrapper">
+            <span className="input-icon-span">🎓</span>
+            <input type="text" placeholder="Course Title" value={course} onChange={(e) => setCourse(e.target.value)} required />
+          </div>
+        </div>
+        <div className="grade-input-group">
+          <div className="input-wrapper">
+            <span className="input-icon-span">📊</span>
+            <input
+              type="number"
+              placeholder="CGPA Score (0.00 - 5.00)"
+              step="0.01"
+              min="0"
+              max="5"
+              value={grade}
+              onChange={(e) => setGrade(e.target.value)}
+              required
+            />
+          </div>
+          {classInfo && (
+            <div className="grade-preview" style={{ borderColor: classInfo.color }}>
+              <span className="preview-icon">{classInfo.icon}</span>
+              <div className="preview-content">
+                <span className="preview-label">Degree Class</span>
+                <span className="preview-value" style={{ color: classInfo.color }}>{classInfo.label}</span>
+              </div>
+            </div>
+          )}
+        </div>
         <div className="file-upload">
           <label htmlFor="document-input" className="file-label">
             📄 {document ? document.name : 'Attach Document (PDF)'}
@@ -418,7 +495,10 @@ function VerifyForm() {
     <div className="section">
       <h2>Verify Certificate</h2>
       <form onSubmit={handleVerify}>
-        <input type="text" placeholder="Enter Certificate ID" value={certId} onChange={(e) => setCertId(e.target.value)} required />
+        <div className="input-wrapper">
+          <span className="input-icon-span">🆔</span>
+          <input type="text" placeholder="Enter Certificate ID (e.g. CERT-123...)" value={certId} onChange={(e) => setCertId(e.target.value)} required />
+        </div>
         <button type="submit" disabled={verifyLoading}>
           {verifyLoading ? 'Verifying...' : 'Verify Certificate'}
         </button>
@@ -507,7 +587,10 @@ function AdminDashboard() {
     if (adminToken) {
       verifyToken();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+
 
   const verifyToken = async () => {
     try {
@@ -636,8 +719,14 @@ function AdminDashboard() {
         <>
           <h2>🔐 Admin Login</h2>
           <form onSubmit={handleAdminLogin}>
-            <input type="text" placeholder="Username" value={adminUsername} onChange={(e) => setAdminUsername(e.target.value)} required />
-            <input type="password" placeholder="Password" value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} required />
+            <div className="input-wrapper">
+              <span className="input-icon-span">🌪️</span>
+              <input type="text" placeholder="Admin Username" value={adminUsername} onChange={(e) => setAdminUsername(e.target.value)} required />
+            </div>
+            <div className="input-wrapper">
+              <span className="input-icon-span">🔒</span>
+              <input type="password" placeholder="Secure Password" value={adminPassword} onChange={(e) => setAdminPassword(e.target.value)} required />
+            </div>
             <button type="submit" disabled={loginLoading}>
               {loginLoading ? 'Logging in...' : 'Login'}
             </button>
@@ -675,13 +764,16 @@ function AdminDashboard() {
           {/* Search Bar */}
           <div className="search-container">
             <div className="search-bar">
-              <input
-                type="text"
-                className="search-input"
-                placeholder="🔍 Search by student name, certificate ID, course, or grade..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-              />
+              <div className="input-wrapper">
+                <span className="input-icon-span">🔍</span>
+                <input
+                  type="text"
+                  className="search-input"
+                  placeholder="Search certificates..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                />
+              </div>
               {searchQuery && (
                 <button
                   className="clear-search-btn"
@@ -760,12 +852,92 @@ function AdminDashboard() {
 
 function MainApp() {
   const [activeTab, setActiveTab] = useState('issue');
+  const [activeModal, setActiveModal] = useState(null);
+
+  const renderModalContent = () => {
+    switch (activeModal) {
+      case 'privacy':
+        return (
+          <LegalModal
+            title="Privacy Policy"
+            content={
+              <div className="legal-text">
+                <p><strong>Last Updated: January 2026</strong></p>
+                <p>Veritas Secure ("we", "our", or "us") is committed to protecting your privacy. This Privacy Policy explains how your information is collected, used, and disclosed by Veritas Secure.</p>
+                <h4>1. Information We Collect</h4>
+                <p>We collect information you provide directly to us, such as student names, course details, and grades necessary for certificate issuance.</p>
+                <h4>2. Blockchain Data</h4>
+                <p>Please note that data stored on the blockchain is immutable and public. We hash personal data where possible, but certificate metadata is permanent.</p>
+                <h4>3. Contact Us</h4>
+                <p>If you have questions about this policy, please contact us at privacy@veritas.com.</p>
+              </div>
+            }
+            onClose={() => setActiveModal(null)}
+          />
+        );
+      case 'terms':
+        return (
+          <LegalModal
+            title="Terms of Service"
+            content={
+              <div className="legal-text">
+                <p><strong>Effective Date: January 2026</strong></p>
+                <h4>1. Acceptance of Terms</h4>
+                <p>By accessing or using our services, you agree to be bound by these Terms. If you do not agree to these Terms, you may not access or use the Services.</p>
+                <h4>2. Immutable Records</h4>
+                <p>You acknowledge that certificates issued on the blockchain cannot be deleted or modified once confirmed. Revocations are recorded as new transactions.</p>
+                <h4>3. Limitation of Liability</h4>
+                <p>Veritas Secure shall not be liable for any indirect, incidental, special, consequential, or punitive damages.</p>
+              </div>
+            }
+            onClose={() => setActiveModal(null)}
+          />
+        );
+      case 'support':
+        return (
+          <LegalModal
+            title="Contact Support"
+            content={
+              <div className="support-channels">
+                <div className="channel-item">
+                  <span className="channel-icon">📧</span>
+                  <div>
+                    <strong>Email Support</strong>
+                    <p>support@veritas.com</p>
+                  </div>
+                </div>
+                <div className="channel-item">
+                  <span className="channel-icon">📞</span>
+                  <div>
+                    <strong>Phone Support</strong>
+                    <p>+1 (555) 123-4567 (Mon-Fri, 9am-5pm EST)</p>
+                  </div>
+                </div>
+                <div className="channel-item">
+                  <span className="channel-icon">🐦</span>
+                  <div>
+                    <strong>Twitter / X</strong>
+                    <p>@VeritasSupport</p>
+                  </div>
+                </div>
+              </div>
+            }
+            onClose={() => setActiveModal(null)}
+          />
+        );
+      default:
+        return null;
+    }
+  };
 
   return (
     <div className="App">
       <header>
-        <h1>🎓 Blockchain Certificate Verification System</h1>
-        <p>Secure Educational Certificates for Nigeria</p>
+        <div className="hero-section">
+          <div className="hero-badge">✨ Blockchain Verified Credentials</div>
+          <h1 className="hero-title">Veritas <span className="gradient-text">Secure</span></h1>
+          <p className="hero-subtitle">The gold standard in decentralized academic verification. Immutable, instant, and globally recognized.</p>
+        </div>
       </header>
 
       <div className="tabs">
@@ -785,6 +957,39 @@ function MainApp() {
         {activeTab === 'verify' && <VerifyForm />}
         {activeTab === 'admin' && <AdminDashboard />}
       </div>
+
+      <div className="how-it-works">
+        <h3>How It Works</h3>
+        <div className="steps-grid">
+          <div className="step-card">
+            <span className="step-icon">📝</span>
+            <h4>1. Issue</h4>
+            <p>Institution issues a digital certificate. The data is hashed and stored permanently on the blockchain.</p>
+          </div>
+          <div className="step-card">
+            <span className="step-icon">🔗</span>
+            <h4>2. Secure</h4>
+            <p>The student receives a tamper-proof certificate ID and QR code linked to the blockchain record.</p>
+          </div>
+          <div className="step-card">
+            <span className="step-icon">✅</span>
+            <h4>3. Verify</h4>
+            <p>Employers or anyone can instantly verify the authenticity by scanning the QR code or entering the ID.</p>
+          </div>
+        </div>
+      </div>
+
+      <footer className="app-footer">
+        <div className="footer-content">
+          <p>&copy; {new Date().getFullYear()} Veritas Secure System. All rights reserved.</p>
+          <div className="footer-links">
+            <button className="footer-link-btn" onClick={() => setActiveModal('privacy')}>Privacy Policy</button>
+            <button className="footer-link-btn" onClick={() => setActiveModal('terms')}>Terms of Service</button>
+            <button className="footer-link-btn" onClick={() => setActiveModal('support')}>Contact Support</button>
+          </div>
+        </div>
+      </footer>
+      {renderModalContent()}
     </div>
   );
 }
