@@ -583,30 +583,7 @@ function AdminDashboard() {
   const [searchQuery, setSearchQuery] = useState('');
   const navigate = useNavigate();
 
-  useEffect(() => {
-    if (adminToken) {
-      verifyToken();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-
-
-  const verifyToken = async () => {
-    try {
-      await axios.get(`${API_URL}/auth/verify`, {
-        headers: { Authorization: `Bearer ${adminToken}` }
-      });
-      setIsAdmin(true);
-      loadAdminData(adminToken);
-    } catch (error) {
-      localStorage.removeItem('adminToken');
-      setAdminToken(null);
-      setIsAdmin(false);
-    }
-  };
-
-  const loadAdminData = async (token = adminToken) => {
+  const loadAdminData = React.useCallback(async (token = adminToken) => {
     setAdminLoading(true);
     try {
       const [certsResponse, statsResponse] = await Promise.all([
@@ -624,7 +601,27 @@ function AdminDashboard() {
     } finally {
       setAdminLoading(false);
     }
-  };
+  }, [adminToken]);
+
+  const verifyToken = React.useCallback(async () => {
+    try {
+      await axios.get(`${API_URL}/auth/verify`, {
+        headers: { Authorization: `Bearer ${adminToken}` }
+      });
+      setIsAdmin(true);
+      loadAdminData(adminToken);
+    } catch (error) {
+      localStorage.removeItem('adminToken');
+      setAdminToken(null);
+      setIsAdmin(false);
+    }
+  }, [adminToken, loadAdminData]);
+
+  useEffect(() => {
+    if (adminToken) {
+      verifyToken();
+    }
+  }, [adminToken, verifyToken]);
 
   const handleAdminLogin = async (e) => {
     e.preventDefault();
@@ -659,7 +656,7 @@ function AdminDashboard() {
     setStats(null);
   };
 
-  const handleRevoke = async (certId) => {
+  const handleRevoke = React.useCallback(async (certId) => {
     if (!window.confirm(`Are you sure you want to revoke certificate ${certId}?`)) return;
 
     setActionLoading(prev => ({ ...prev, [certId]: 'revoking' }));
@@ -674,9 +671,9 @@ function AdminDashboard() {
     } finally {
       setActionLoading(prev => ({ ...prev, [certId]: null }));
     }
-  };
+  }, [adminToken, loadAdminData]);
 
-  const handleDelete = async (certId) => {
+  const handleDelete = React.useCallback(async (certId) => {
     if (!window.confirm(`Delete certificate ${certId} from database?`)) return;
 
     setActionLoading(prev => ({ ...prev, [certId]: 'deleting' }));
@@ -691,27 +688,29 @@ function AdminDashboard() {
     } finally {
       setActionLoading(prev => ({ ...prev, [certId]: null }));
     }
-  };
+  }, [adminToken, loadAdminData]);
 
   const goToPublicVerify = (id) => {
     navigate(`/verify/${id}`);
   };
 
-  // Filter certificates based on search query
-  const filteredCertificates = certificates.filter(cert => {
-    if (!searchQuery) return true;
+  // Filter certificates based on search query - MEMOIZED for performance
+  const filteredCertificates = React.useMemo(() => {
+    if (!searchQuery) return certificates;
 
     const query = searchQuery.toLowerCase();
-    const studentName = (cert.blockchainData?.studentName || cert.studentName || '').toLowerCase();
-    const course = (cert.blockchainData?.course || cert.course || '').toLowerCase();
-    const grade = (cert.blockchainData?.grade || cert.grade || '').toLowerCase();
-    const certId = (cert.certId || '').toLowerCase();
+    return certificates.filter(cert => {
+      const studentName = (cert.blockchainData?.studentName || cert.studentName || '').toLowerCase();
+      const course = (cert.blockchainData?.course || cert.course || '').toLowerCase();
+      const grade = (cert.blockchainData?.grade || cert.grade || '').toLowerCase();
+      const certIdString = (cert.certId || '').toLowerCase();
 
-    return studentName.includes(query) ||
-      course.includes(query) ||
-      grade.includes(query) ||
-      certId.includes(query);
-  });
+      return studentName.includes(query) ||
+        course.includes(query) ||
+        grade.includes(query) ||
+        certIdString.includes(query);
+    });
+  }, [certificates, searchQuery]);
 
   return (
     <div className="section">
