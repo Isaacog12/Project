@@ -326,7 +326,7 @@ function IssueForm() {
                 <div className="form-group">
                     <div className="input-wrapper">
                         <span className="input-icon-span">🎓</span>
-                        <input type="text" placeholder="Course Title" value={course} onChange={(e) => setCourse(e.target.value)} required />
+                        <input type="text" placeholder="Department" value={course} onChange={(e) => setCourse(e.target.value)} required />
                     </div>
                 </div>
                 <div className="grade-input-group">
