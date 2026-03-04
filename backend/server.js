@@ -170,7 +170,8 @@ const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
 
 const CONTRACT_ABI = [
     "function issueCertificate(string certId, string studentName, string course, string grade) external",
-    "function verifyCertificate(string certId) external view returns (string studentName, string course, string grade, uint256 issueDate, bool isRevoked)",
+    "function batchIssueCertificates(string[] certIds, string[] studentNames, string[] courses, string[] grades) external",
+    "function verifyCertificate(string certId) external view returns (string, string, string, uint256, bool)",
     "function revokeCertificate(string certId) external"
 ];
 
@@ -234,7 +235,7 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
     const timesBold = await pdfDoc.embedFont(StandardFonts.TimesRomanBold);
     const timesItalic = await pdfDoc.embedFont(StandardFonts.TimesRomanItalic);
 
-    // Veritas green color
+    // SecureCert green color
     const Green = rgb(0.04, 0.29, 0.20);
     const goldColor = rgb(0.72, 0.53, 0.04);
     const darkGray = rgb(0.2, 0.2, 0.2);
@@ -338,7 +339,7 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
     }
 
     // University name
-    const universityText = 'Veritas University Abuja';
+    const universityText = 'SecureCert';
     const universitySize = 20;
     const universityWidth = timesBold.widthOfTextAtSize(universityText, universitySize);
     page.drawText(universityText, {
@@ -482,7 +483,7 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
     });
 
     // Signature title
-    const sigTitle = 'Registrar, Veritas University Abuja';
+    const sigTitle = 'Registrar, SecureCert';
     const sigTitleSize = 10;
     const sigTitleWidth = helvetica.widthOfTextAtSize(sigTitle, sigTitleSize);
     page.drawText(sigTitle, {

@@ -137,7 +137,7 @@ function PublicVerifyPage() {
             <header>
                 <div className="hero-section">
                     <div className="hero-badge">✨ Blockchain Verified Credentials</div>
-                    <h1 className="hero-title">Veritas <span className="gradient-text">Secure</span></h1>
+                    <h1 className="hero-title">Secure<span className="gradient-text">Cert</span></h1>
                     <p className="hero-subtitle">The gold standard in decentralized academic verification. Immutable, instant, and globally recognized.</p>
                 </div>
             </header>
@@ -862,13 +862,13 @@ function MainApp() {
                         content={
                             <div className="legal-text">
                                 <p><strong>Last Updated: January 2026</strong></p>
-                                <p>Veritas Secure ("we", "our", or "us") is committed to protecting your privacy. This Privacy Policy explains how your information is collected, used, and disclosed by Veritas Secure.</p>
+                                <p>SecureCert ("we", "our", or "us") is committed to protecting your privacy. This Privacy Policy explains how your information is collected, used, and disclosed by SecureCert.</p>
                                 <h4>1. Information We Collect</h4>
                                 <p>We collect information you provide directly to us, such as student names, course details, and grades necessary for certificate issuance.</p>
                                 <h4>2. Blockchain Data</h4>
                                 <p>Please note that data stored on the blockchain is immutable and public. We hash personal data where possible, but certificate metadata is permanent.</p>
                                 <h4>3. Contact Us</h4>
-                                <p>If you have questions about this policy, please contact us at privacy@veritas.com.</p>
+                                <p>If you have questions about this policy, please contact us at privacy@securecert.com.</p>
                             </div>
                         }
                         onClose={() => setActiveModal(null)}
@@ -886,7 +886,7 @@ function MainApp() {
                                 <h4>2. Immutable Records</h4>
                                 <p>You acknowledge that certificates issued on the blockchain cannot be deleted or modified once confirmed. Revocations are recorded as new transactions.</p>
                                 <h4>3. Limitation of Liability</h4>
-                                <p>Veritas Secure shall not be liable for any indirect, incidental, special, consequential, or punitive damages.</p>
+                                <p>SecureCert shall not be liable for any indirect, incidental, special, consequential, or punitive damages.</p>
                             </div>
                         }
                         onClose={() => setActiveModal(null)}
@@ -902,7 +902,7 @@ function MainApp() {
                                     <span className="channel-icon">📧</span>
                                     <div>
                                         <strong>Email Support</strong>
-                                        <p>support@veritas.com</p>
+                                        <p>support@securecert.com</p>
                                     </div>
                                 </div>
                                 <div className="channel-item">
@@ -916,7 +916,7 @@ function MainApp() {
                                     <span className="channel-icon">🐦</span>
                                     <div>
                                         <strong>Twitter / X</strong>
-                                        <p>@VeritasSupport</p>
+                                        <p>@SecureCertSupport</p>
                                     </div>
                                 </div>
                             </div>
@@ -934,7 +934,7 @@ function MainApp() {
             <header>
                 <div className="hero-section">
                     <div className="hero-badge">✨ Blockchain Verified Credentials</div>
-                    <h1 className="hero-title">Veritas <span className="gradient-text">Secure</span></h1>
+                    <h1 className="hero-title">Secure<span className="gradient-text">Cert</span></h1>
                     <p className="hero-subtitle">The gold standard in decentralized academic verification. Immutable, instant, and globally recognized.</p>
                 </div>
             </header>
@@ -980,7 +980,7 @@ function MainApp() {
 
             <footer className="app-footer">
                 <div className="footer-content">
-                    <p>&copy; {new Date().getFullYear()} Veritas Secure System. All rights reserved.</p>
+                    <p>&copy; {new Date().getFullYear()} SecureCert System. All rights reserved.</p>
                     <div className="footer-links">
                         <button className="footer-link-btn" onClick={() => setActiveModal('privacy')}>Privacy Policy</button>
                         <button className="footer-link-btn" onClick={() => setActiveModal('terms')}>Terms of Service</button>

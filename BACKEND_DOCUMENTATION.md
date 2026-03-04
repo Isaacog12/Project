@@ -1,4 +1,4 @@
-# Backend Documentation — Veritas Secure
+# Backend Documentation — SecureCert
 
 ## Overview
 
@@ -413,7 +413,7 @@ The `generateCertificatePDF()` function creates elaborate award-style certificat
 │  │  ──── GREEN INNER BORDER ────  │          │
 │  │                                 │          │
 │  │         [University Logo]       │          │
-│  │     Veritas University Abuja    │          │
+│  │     SecureCert    │          │
 │  │    ──── gold line ────          │          │
 │  │                                 │          │
 │  │    AWARD OF EXCELLENCE          │          │
@@ -427,7 +427,7 @@ The `generateCertificatePDF()` function creates elaborate award-style certificat
 │  │                                 │          │
 │  │    Issued on Date               │          │
 │  │    ─── Signature Line ───       │          │
-│  │    Registrar, Veritas Univ.     │          │
+│  │    Registrar, SecureCert     │          │
 │  │                                 │          │
 │  │ [OFFICIAL]          [QR CODE]   │          │
 │  │ [SEAL]              Scan to     │          │
@@ -448,7 +448,7 @@ The `generateCertificatePDF()` function creates elaborate award-style certificat
 - **Helvetica** — Dates, labels, metadata
 
 ### Colors:
-- **Veritas Green:** `rgb(0.04, 0.29, 0.20)` — University brand color
+- **SecureCert Green:** `rgb(0.04, 0.29, 0.20)` — University brand color
 - **Gold:** `rgb(0.72, 0.53, 0.04)` — Borders and accents
 - **Dark Gray:** `rgb(0.2, 0.2, 0.2)` — Body text
 

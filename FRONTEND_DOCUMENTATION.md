@@ -1,4 +1,4 @@
-# Frontend Documentation — Veritas Secure
+# Frontend Documentation — SecureCert
 
 ## Overview
 
@@ -103,7 +103,7 @@ function App() {
 
 This is the **main page** that users see when they visit the website. It contains:
 
-- **Hero Section** — A branded header with the title "Veritas Secure" and a tagline
+- **Hero Section** — A branded header with the title "SecureCert" and a tagline
 - **Tab Navigation** — Three tabs: Issue Certificate, Verify Certificate, Admin
 - **Content Area** — Renders the active tab's component
 - **How It Works** — A 3-step visual guide (Issue → Secure → Verify)
@@ -359,7 +359,7 @@ All styles are in `App.css` (41,000+ bytes). Key design features:
 - **Smooth Animations** — Loading spinners, hover effects, transitions
 - **Responsive Design** — Works on desktop, tablet, and mobile
 - **Dark/Premium Color Palette** — Deep greens, golds, and dark backgrounds
-- **Veritas University Branding** — Green and gold color scheme
+- **SecureCert Branding** — Green and gold color scheme
 
 ---
 

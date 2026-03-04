@@ -144,7 +144,7 @@ Frontend runs on `http://localhost:3000`
 - **Search Functionality** - Real-time filtering in admin dashboard
 - **Responsive Design** - Works on desktop, tablet, and mobile
 - **Premium Animations** - Smooth transitions and glassmorphism effects
-- **Veritas Branding** - University logo watermark background
+- **SecureCert Branding** - University logo watermark background
 
 ## 🔒 Security
 
@@ -164,6 +164,6 @@ This project is licensed under the MIT License.
 
 ## 🙏 Acknowledgments
 
-- Veritas University Abuja
+- SecureCert
 - Ethereum Foundation
 - Alchemy for RPC services

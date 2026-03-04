@@ -1,4 +1,4 @@
-# Blockchain Documentation — Veritas Secure
+# Blockchain Documentation — SecureCert
 
 ## Overview
 
