@@ -1,169 +1,107 @@
-# Blockchain Certificate Verification System
+# 🛡️ SecureCert: Blockchain Credentialing System
 
-A secure, blockchain-based certificate verification system for educational institutions in Nigeria, built with React, Node.js, and Ethereum smart contracts.
+<div align="center">
+  <h3>Immutable trust for academic excellence.</h3>
+  <p><i>A decentralized platform for issuing, managing, and verifying academic credentials with cryptographic certainty.</i></p>
+</div>
 
-## 🎓 Features
+---
 
-- **Issue Certificates** - Create blockchain-secured academic certificates
-- **Verify Certificates** - Instant verification with QR codes
-- **Admin Dashboard** - Manage, search, and revoke certificates
-- **PDF Generation** - Beautiful award-style certificates with decorative borders
-- **Blockchain Security** - Tamper-proof storage on Ethereum Sepolia testnet
-- **Premium UI** - Glassmorphism design with smooth animations
+## 🌟 Project Overview
 
-## 🚀 Tech Stack
+**SecureCert** is a next-generation academic registry built to eliminate certificate fraud in educational institutions. By leveraging the **Ethereum Blockchain** and **IPFS**, SecureCert provides a tamper-proof record of student achievements that can be verified instantly by anyone, anywhere in the world.
 
-### Frontend
-- **React.js (v19)** - Component-based UI library
-- **React Router DOM (v7)** - Client-side routing
-- **Axios** - Promise-based HTTP client
-- **CSS3** - Custom styling with glassmorphism effects and animations
-- **Web Vitals** - Performance monitoring
+### Key Pillars:
+- **🔒 Immutability**: Once a certificate is issued, it cannot be altered or faked.
+- **⚡ Instant Verification**: QR-code based verification eliminates manual background checks.
+- **📂 Decentralized Storage**: Certificate metadata and documents are stored on IPFS, ensuring permanent availability.
+- **📊 Admin Control**: Comprehensive dashboard for institutions to manage their credential lifecycle.
 
-### Backend API
-- **Node.js & Express.js** - Server-side runtime and framework
-- **Ethers.js (v6)** - Blockchain interaction
-- **Better-SQLite3** - High-performance local database
-- **Multer** - Middleware for handling `multipart/form-data`
-- **PDF-Lib** - PDF generation and manipulation
-- **QRCode** - 2D barcode generation
-- **JWT (JSON Web Tokens)** - Secure authentication
-- **Bcryptjs** - Password hashing
-- **Helmet** - Security headers
-- **Express Validator** - Request data validation
-- **Express Rate Limit** - Brute-force protection
+---
 
-### Blockchain
-- **Solidity** - Smart contract programming language
-- **Hardhat** - Ethereum development environment
-- **OpenZeppelin Contracts** - Standardized, secure smart contracts
-- **TypeScript** - Type-safe development
-- **TypeChain** - TypeScript bindings for Ethereum smart contracts
-- **Chai** - BDD / TDD assertion library
+## 🚀 Quick Execution Guide
 
-## 📋 Prerequisites
+To get the full system running in a development environment, follow these four steps in separate terminal windows:
 
-- Node.js (v14 or higher)
-- npm or yarn
-- MetaMask wallet (for blockchain transactions)
-- Alchemy API key (for Ethereum RPC)
-
-## 🛠️ Installation
-
-### 1. Clone the repository
-```bash
-git clone <your-repo-url>
-cd Project
-```
-
-### 2. Install dependencies
-
-**Frontend:**
-```bash
-cd frontend
-npm install
-```
-
-**Backend:**
-```bash
-cd backend
-npm install
-```
-
-**Blockchain:**
-```bash
+### 1. Start the Blockchain Node
+```powershell
 cd blockchain
-npm install
+npx hardhat node
 ```
 
-### 3. Environment Setup
-
-Create a `.env` file in the `backend` directory:
-
-```env
-PORT=5000
-FRONTEND_URL=http://localhost:3000
-RPC_URL=https://eth-sepolia.g.alchemy.com/v2/YOUR_ALCHEMY_KEY
-PRIVATE_KEY=your_wallet_private_key
-CONTRACT_ADDRESS=your_deployed_contract_address
-ADMIN_USERNAME=admin
-ADMIN_PASSWORD=your_secure_password
-JWT_SECRET=your_jwt_secret
-```
-
-### 4. Deploy Smart Contract
-
-```bash
+### 2. Deploy the Smart Contract
+```powershell
 cd blockchain
-npx hardhat run scripts/deploy.js --network sepolia
+npx hardhat run scripts/simple-deploy.js --network localhost
 ```
 
-Copy the deployed contract address to your `.env` file.
-
-## 🏃 Running the Application
-
-### Start Backend Server
-```bash
+### 3. Launch the Backend API
+```powershell
 cd backend
 node server.js
 ```
-Server runs on `http://localhost:5000`
 
-### Start Frontend
-```bash
+### 4. Launch the Frontend UI
+```powershell
 cd frontend
 npm start
 ```
-Frontend runs on `http://localhost:3000`
 
-## 📱 Usage
+---
 
-### Issue a Certificate
-1. Navigate to "Issue Certificate" tab
-2. Fill in student details (name, course, grade)
-3. Upload supporting document (optional)
-4. Click "Issue Certificate"
-5. Wait for blockchain confirmation
+## 🏗️ System Architecture
 
-### Verify a Certificate
-1. Navigate to "Verify Certificate" tab
-2. Enter certificate ID or scan QR code
-3. View certificate details and blockchain verification
+```mermaid
+graph TD
+    User((User/Student)) -->|Verify QR| Portal[Public Verification Portal]
+    Admin((Institution Admin)) -->|Issue/Revoke| Dash[Admin Dashboard]
+    
+    subgraph "Frontend (React)"
+        Portal
+        Dash
+    end
+    
+    Dash -->|API Request| Backend[Node.js API]
+    Backend -->|Mint Token| Blockchain[(Ethereum/Hardhat Node)]
+    Backend -->|Store Metadata| IPFS[Pinata IPFS Gateway]
+    Backend -->|Local Cache| DB[(SQLite/Prisma)]
+    
+    Portal -->|Query| Blockchain
+    Portal -->|Fetch PDF| Backend
+```
 
-### Admin Dashboard
-1. Navigate to "Admin" tab
-2. Login with credentials
-3. View statistics and all certificates
-4. Search certificates by name, ID, course, or grade
-5. Revoke or delete certificates as needed
+---
 
-## 🎨 Design Features
+## 🛠️ Technology Stack
 
-- **Decorative PDF Certificates** - Award-style design with gold/green borders
-- **QR Code Integration** - Instant verification via smartphone
-- **Search Functionality** - Real-time filtering in admin dashboard
-- **Responsive Design** - Works on desktop, tablet, and mobile
-- **Premium Animations** - Smooth transitions and glassmorphism effects
-- **SecureCert Branding** - University logo watermark background
+| Layer | Technologies |
+| :--- | :--- |
+| **Frontend** | React 19, React Router 7, Ethers.js, Axios, CSS3 (Glassmorphism) |
+| **Backend** | Node.js, Express, Prisma, PDF-Lib, QRCode, JWT, Bcrypt |
+| **Blockchain** | Solidity, Hardhat, OpenZeppelin, Sepolia/Local Node |
+| **Storage** | IPFS (Pinata), SQLite (Better-SQLite3) |
 
-## 🔒 Security
+---
 
-- Blockchain-based certificate storage (tamper-proof)
-- JWT authentication for admin access
-- Environment variable protection
-- Input validation and sanitization
-- CORS configuration
+## 🎨 Premium Features
 
-## 📄 License
+- **Award-Style PDF Generation**: Beautifully designed certificates with university-specific branding and security watermarks.
+- **Cinematic Verification**: A premium, high-engagement verification portal with smooth animations and status indicators.
+- **Bulk Issuance**: Support for CSV-based batch processing to issue hundreds of certificates in one transaction.
+- **Dual Verification**: Hybrid check system that validates data against both the Blockchain ledger and IPFS metadata.
+- **Institutional Branding**: Dynamic logo synchronization that automatically tailors certificate designs to the issuing university.
 
-This project is licensed under the MIT License.
+---
 
-## 👥 Contributors
+## 👥 Contributors & Acknowledgments
 
-- Your Name - Initial work
+- **TIFE** - Lead Developer & Architect (made with love ❤️)
+- **Isaacog12** - Project Lead
+- **SecureCert Systems** - Inspiration and Branding
 
-## 🙏 Acknowledgments
+---
 
-- SecureCert
-- Ethereum Foundation
-- Alchemy for RPC services
+<div align="center">
+  <p><i>This project was built as a proof-of-concept for the modernization of the Nigerian academic registry system.</i></p>
+  <p><b>SecureCert © 2026</b></p>
+</div>

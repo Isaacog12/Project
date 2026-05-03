@@ -1,0 +1,29 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+model Certificate {
+  id                   Int      @id @default(autoincrement())
+  certId               String   @unique
+  studentName          String
+  institution          String
+  course               String
+  grade                String
+  issueDate            String
+  txHash               String?
+  documentPath         String?
+  documentOriginalName String?
+  studentEmail         String?
+  ipfsCID              String?
+  notes                String?
+  createdAt            DateTime @default(now())
+
+  @@index([certId])
+}

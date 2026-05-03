@@ -49,3 +49,6 @@ coverage/
 .cache/
 temp/
 tmp/
+
+# Mock Data
+backend/tests/mock_data/

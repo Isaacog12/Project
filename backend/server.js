@@ -8,10 +8,16 @@ const { ethers } = require('ethers');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
-const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
+const { PDFDocument, rgb, degrees, StandardFonts } = require('pdf-lib');
 const jwt = require('jsonwebtoken');
+const { PrismaClient } = require('@prisma/client');
 const Database = require('better-sqlite3');
+
+
 const QRCode = require('qrcode');
+const csv = require('csv-parser');
+const axios = require('axios');
+const FormData = require('form-data');
 
 // ============================================
 // ENVIRONMENT VALIDATION
@@ -37,6 +43,7 @@ if (missingVars.length > 0) {
 }
 
 console.log('✅ Environment variables validated');
+console.log('DEBUG: DATABASE_URL is', process.env.DATABASE_URL);
 
 // ============================================
 // EXPRESS APP SETUP
@@ -92,32 +99,101 @@ app.use((req, res, next) => {
 });
 
 // ============================================
-// DATABASE SETUP (SQLite)
+// DATABASE SETUP (Prisma)
 // ============================================
 
-const dbPath = path.join(__dirname, 'certificates.db');
-const db = new Database(dbPath);
+const { PrismaBetterSqlite3 } = require('@prisma/adapter-better-sqlite3');
+const dbUrl = process.env.DATABASE_URL || 'file:./dev.db';
+const db = new Database(dbUrl.replace('file:', ''));
+const adapter = new PrismaBetterSqlite3({ url: dbUrl });
+const prisma = new PrismaClient({ adapter });
+console.log('Prisma Client initialized with better-sqlite3 adapter');
 
-// Create tables if they don't exist
-db.exec(`
-    CREATE TABLE IF NOT EXISTS certificates (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        certId TEXT UNIQUE NOT NULL,
-        studentName TEXT NOT NULL,
-        course TEXT NOT NULL,
-        grade TEXT NOT NULL,
-        issueDate TEXT NOT NULL,
-        txHash TEXT,
-        documentPath TEXT,
-        documentOriginalName TEXT,
-        notes TEXT,
-        createdAt TEXT DEFAULT CURRENT_TIMESTAMP
-    );
-    
-    CREATE INDEX IF NOT EXISTS idx_certId ON certificates(certId);
-`);
+/**
+ * Pins a file buffer to the global IPFS network using the Pinata gateway.
+ */
+async function pinToIPFS(pdfBuffer, certId) {
+    const pinataApiKey = process.env.PINATA_API_KEY;
+    const pinataSecretApiKey = process.env.PINATA_SECRET_API_KEY;
 
-console.log('Database initialized at:', dbPath);
+    if (!pinataApiKey || !pinataSecretApiKey) {
+        console.error('❌ Pinata API keys are missing. IPFS pinning disabled.');
+        throw new Error('IPFS configuration missing. Please set PINATA_API_KEY and PINATA_SECRET_API_KEY.');
+    }
+
+    try {
+        const url = `https://api.pinata.cloud/pinning/pinFileToIPFS`;
+        let data = new FormData();
+        data.append('file', pdfBuffer, {
+            filename: `${certId}.pdf`,
+            contentType: 'application/pdf',
+        });
+
+        const response = await axios.post(url, data, {
+            maxBodyLength: 'Infinity',
+            headers: {
+                'Content-Type': `multipart/form-data; boundary=${data._boundary}`,
+                'pinata_api_key': pinataApiKey,
+                'pinata_secret_api_key': pinataSecretApiKey
+            }
+        });
+
+        console.log(`📌 Pinned ${certId} to IPFS: ${response.data.IpfsHash}`);
+        return response.data.IpfsHash;
+    } catch (error) {
+        console.error('❌ IPFS pinning failed:', error.response?.data || error.message);
+        return null;
+    }
+}
+
+/**
+ * Pins JSON metadata to IPFS.
+ */
+async function pinJSONToIPFS(metadata, certId) {
+    const pinataApiKey = process.env.PINATA_API_KEY;
+    const pinataSecretApiKey = process.env.PINATA_SECRET_API_KEY;
+
+    if (!pinataApiKey || !pinataSecretApiKey) {
+        console.error('❌ Pinata API keys are missing. IPFS JSON pinning disabled.');
+        throw new Error('IPFS configuration missing. Please set PINATA_API_KEY and PINATA_SECRET_API_KEY.');
+    }
+
+    try {
+        const url = `https://api.pinata.cloud/pinning/pinJSONToIPFS`;
+        const response = await axios.post(url, {
+            pinataContent: metadata,
+            pinataMetadata: {
+                name: `${certId}_metadata.json`
+            }
+        }, {
+            headers: {
+                'pinata_api_key': pinataApiKey,
+                'pinata_secret_api_key': pinataSecretApiKey
+            }
+        });
+
+        console.log(`📌 Pinned ${certId} metadata to IPFS: ${response.data.IpfsHash}`);
+        return response.data.IpfsHash;
+    } catch (error) {
+        console.error('❌ IPFS JSON pinning failed:', error.response?.data || error.message);
+        return null;
+    }
+}
+
+/**
+ * Fetches metadata JSON from IPFS.
+ */
+async function fetchFromIPFS(cid) {
+    if (cid.startsWith('mock-')) return null;
+    try {
+        const url = `https://gateway.pinata.cloud/ipfs/${cid}`;
+        const response = await axios.get(url, { timeout: 5000 });
+        return response.data;
+    } catch (error) {
+        console.error(`❌ Failed to fetch from IPFS (${cid}):`, error.message);
+        return null;
+    }
+}
 
 // ============================================
 // MULTER SETUP
@@ -158,10 +234,7 @@ fetchReq.timeout = 120000; // 120 seconds timeout to handle slow blockchain resp
 
 const provider = new ethers.JsonRpcProvider(
     fetchReq,
-    {
-        name: 'sepolia',
-        chainId: 11155111
-    },
+    undefined, // Auto-detect network
     {
         staticNetwork: true
     }
@@ -169,10 +242,11 @@ const provider = new ethers.JsonRpcProvider(
 const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
 
 const CONTRACT_ABI = [
-    "function issueCertificate(string certId, string studentName, string course, string grade) external",
-    "function batchIssueCertificates(string[] certIds, string[] studentNames, string[] courses, string[] grades) external",
-    "function verifyCertificate(string certId) external view returns (string, string, string, uint256, bool)",
-    "function revokeCertificate(string certId) external"
+    "function issueCertificate(string certId, string metadataCID) external payable",
+    "function batchIssueCertificates(string[] certIds, string[] metadataCIDs) external payable",
+    "function verifyCertificate(string certId) external view returns (string, uint256, bool)",
+    "function revokeCertificate(string certId)",
+    "function issuanceFee() external view returns (uint256)"
 ];
 
 const contract = new ethers.Contract(
@@ -240,14 +314,40 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
     const goldColor = rgb(0.72, 0.53, 0.04);
     const darkGray = rgb(0.2, 0.2, 0.2);
 
-    // Randomly select logo (1 or 2)
-    const logoNumber = Math.random() < 0.5 ? 1 : 2;
-
-    // Add subtle logo watermark as background
+    // Attempt to load specific university logo
+    let logoImage = null;
     try {
-        const logoBytes = logoBuffers[logoNumber];
+        const assetsDir = path.join(__dirname, 'assets');
+        // Try .png then .jpg then .jpeg
+        const possibleExtensions = ['.png', '.jpg', '.jpeg'];
+        let logoBytes = null;
+        let selectedExt = null;
+
+        for (const ext of possibleExtensions) {
+            const logoPath = path.join(assetsDir, `${certData.institution}${ext}`);
+            if (fs.existsSync(logoPath)) {
+                logoBytes = fs.readFileSync(logoPath);
+                selectedExt = ext;
+                break;
+            }
+        }
+
         if (logoBytes) {
-            const logoImage = await pdfDoc.embedJpg(logoBytes);
+            // Embed the image based on its type
+            if (selectedExt === '.png' || logoBytes.slice(0, 4).toString('hex') === '89504e47') {
+                logoImage = await pdfDoc.embedPng(logoBytes);
+            } else {
+                logoImage = await pdfDoc.embedJpg(logoBytes);
+            }
+        }
+    } catch (error) {
+        console.warn(`⚠️ Could not load logo for ${certData.institution}:`, error.message);
+    }
+
+    // Logo watermark removed as requested
+    // Add subtle logo watermark as background
+    if (logoImage) {
+        try {
             const logoAspectRatio = logoImage.width / logoImage.height;
             const targetHeight = height * 0.5;
             const targetWidth = targetHeight * logoAspectRatio;
@@ -257,11 +357,11 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
                 y: height / 2 - targetHeight / 2,
                 width: targetWidth,
                 height: targetHeight,
-                opacity: 0.03,
+                opacity: 0.05,
             });
+        } catch (error) {
+            console.error('Error adding logo watermark:', error.message);
         }
-    } catch (error) {
-        console.error('Error adding logo watermark:', error.message);
     }
 
     // === DECORATIVE BORDER SYSTEM ===
@@ -317,30 +417,29 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
         });
     });
 
-    // === HEADER SECTION ===
-    // University logo at top center
-    try {
-        const logoBytes = logoBuffers[logoNumber];
-        if (logoBytes) {
-            const logoImage = await pdfDoc.embedJpg(logoBytes);
+    // Header logo removed as requested
+    // Header logo - Dynamic based on university
+    if (logoImage) {
+        try {
             const logoAspectRatio = logoImage.width / logoImage.height;
-            const logoHeight = 60;
+            const logoHeight = 70;
             const logoWidth = logoHeight * logoAspectRatio;
 
             page.drawImage(logoImage, {
                 x: width / 2 - logoWidth / 2,
-                y: height - 110,
+                y: height - 120,
                 width: logoWidth,
                 height: logoHeight,
             });
+        } catch (error) {
+            console.error('Error adding header logo:', error.message);
         }
-    } catch (error) {
-        console.error('Error adding header logo:', error.message);
     }
 
-    // University name
-    const universityText = 'SecureCert';
-    const universitySize = 20;
+    // University name (dynamically from certData)
+    console.log('🎨 PDF Rendering Institution:', certData.institution);
+    const universityText = String(certData.institution || 'SECURECERT VERIFIED').toUpperCase();
+    const universitySize = 18;
     const universityWidth = timesBold.widthOfTextAtSize(universityText, universitySize);
     page.drawText(universityText, {
         x: width / 2 - universityWidth / 2,
@@ -763,6 +862,35 @@ app.get('/api/auth/verify', authenticateToken, (req, res) => {
 // PUBLIC ENDPOINTS
 // ============================================
 
+// Pin metadata to IPFS before MetaMask transaction
+app.post('/api/certificates/pin-metadata', async (req, res, next) => {
+    try {
+        const { studentName, institution, course, grade, studentEmail } = req.body;
+        const certId = `CERT${Date.now()}`;
+
+        const metadata = {
+            certId,
+            studentName,
+            institution,
+            course,
+            grade,
+            issueDate: new Date().toISOString(),
+            studentEmail: studentEmail || null
+        };
+
+        const metadataCID = await pinJSONToIPFS(metadata, certId);
+
+        res.json({
+            success: true,
+            certId,
+            metadataCID,
+            metadata
+        });
+    } catch (error) {
+        next(error);
+    }
+});
+
 // Issue certificate with optional document
 app.post('/api/certificates/issue',
     upload.single('document'),
@@ -777,13 +905,31 @@ app.post('/api/certificates/issue',
     handleValidationErrors,
     async (req, res, next) => {
         try {
-            const { studentName, course, grade } = req.body;
+            const { studentName, institution, course, grade, studentEmail } = req.body;
             const certId = `CERT${Date.now()}`;
 
             console.log(`📝 Issuing certificate for: ${studentName}`);
 
-            // Issue on blockchain
-            const tx = await contract.issueCertificate(certId, studentName, course, grade);
+            // Prepare metadata for IPFS
+            const metadata = {
+                certId,
+                studentName,
+                institution,
+                course,
+                grade,
+                issueDate: new Date().toISOString(),
+                studentEmail: studentEmail || null
+            };
+
+            // Pin metadata JSON to IPFS
+            const metadataCID = await pinJSONToIPFS(metadata, certId);
+
+            // Fetch issuance fee from contract
+            const issuanceFee = await contract.issuanceFee();
+            console.log(`💰 Paying issuance fee: ${ethers.formatEther(issuanceFee)} ETH`);
+
+            // Issue on blockchain (Stores only CID)
+            const tx = await contract.issueCertificate(certId, metadataCID, { value: issuanceFee });
             await tx.wait();
 
             let documentPath = null;
@@ -798,12 +944,27 @@ app.post('/api/certificates/issue',
             // Generate QR Code
             const qrCode = await generateQRCode(certId);
 
-            // Save to database
-            const stmt = db.prepare(`
-                INSERT INTO certificates (certId, studentName, course, grade, issueDate, txHash, documentPath, documentOriginalName)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            `);
-            stmt.run(certId, studentName, course, grade, new Date().toISOString(), tx.hash, documentPath, req.file?.originalname || null);
+            // Generate PDF and Pin to IPFS (the actual certificate document)
+            const certData = { certId, studentName, institution, course, grade, issueDate: new Date(), txHash: tx.hash };
+            const pdfBytes = await generateCertificatePDF(certData, qrCode);
+            const ipfsCID = await pinToIPFS(Buffer.from(pdfBytes), certId);
+
+            // Save to database using Prisma
+            await prisma.certificate.create({
+                data: {
+                    certId,
+                    studentName,
+                    institution,
+                    course,
+                    grade,
+                    issueDate: new Date().toISOString(),
+                    txHash: tx.hash,
+                    documentPath,
+                    documentOriginalName: req.file?.originalname || null,
+                    studentEmail: studentEmail || null,
+                    ipfsCID
+                }
+            });
 
             console.log(`✅ Certificate issued: ${certId}`);
 
@@ -811,9 +972,11 @@ app.post('/api/certificates/issue',
                 success: true,
                 certId,
                 txHash: tx.hash,
+                issueDate: new Date().toISOString(),
                 hasDocument: !!documentPath,
                 qrCode,
                 verifyUrl: `${FRONTEND_URL}/verify/${certId}`,
+                ipfsCID,
                 message: 'Certificate issued successfully'
             });
         } catch (error) {
@@ -826,39 +989,168 @@ app.post('/api/certificates/issue',
     }
 );
 
+// Issue certificate metadata only (when transaction is signed by MetaMask via frontend)
+app.post('/api/certificates/issue-metadata',
+    upload.single('document'),
+    [
+        body('certId').trim().notEmpty().withMessage('Certificate ID is required'),
+        body('studentName').trim().notEmpty().withMessage('Student name is required'),
+        body('institution').trim().notEmpty().withMessage('Institution name is required'),
+        body('course').trim().notEmpty().withMessage('Course is required'),
+        body('grade').trim().notEmpty().withMessage('Grade is required'),
+        body('txHash').trim().notEmpty().withMessage('Transaction Hash is required'),
+        body('issueDate').trim().notEmpty().withMessage('Issue Date is required')
+    ],
+    handleValidationErrors,
+    async (req, res, next) => {
+        try {
+            console.log('📥 RECEIVED METADATA REQUEST:', req.body);
+            let { certId, studentName, institution, course, grade, txHash, issueDate, studentEmail, metadataCID } = req.body;
+
+            // Safety: Handle case where institution might be sent as an array
+            if (Array.isArray(institution)) {
+                institution = institution[0];
+            }
+
+            if (!institution) {
+                console.warn('⚠️ WARNING: Institution is missing from request body!');
+            }
+
+            console.log(`📝 Saving MetaMask metadata for certificate: ${certId} (Institution: ${institution})`);
+
+            let documentPath = null;
+            if (req.file) {
+                const ext = path.extname(req.file.originalname);
+                const newFilename = `${certId}${ext}`;
+                const newPath = path.join(__dirname, 'uploads', newFilename);
+                fs.renameSync(req.file.path, newPath);
+                documentPath = newFilename;
+            }
+
+            // Generate QR Code
+            const qrCode = await generateQRCode(certId);
+
+            // Generate PDF and Pin to IPFS
+            const certData = {
+                certId: certId,
+                studentName: studentName,
+                institution: institution,
+                course: course,
+                grade: grade,
+                issueDate: new Date(),
+                txHash: txHash
+            };
+            console.log('📦 Final certData for PDF:', certData);
+            const pdfBytes = await generateCertificatePDF(certData, qrCode);
+            const ipfsCID = await pinToIPFS(Buffer.from(pdfBytes), certId);
+
+            // Save to database
+            await prisma.certificate.create({
+                data: {
+                    certId,
+                    studentName,
+                    institution,
+                    course,
+                    grade,
+                    issueDate,
+                    txHash,
+                    documentPath,
+                    documentOriginalName: req.file?.originalname || null,
+                    studentEmail: studentEmail || null,
+                    ipfsCID
+                }
+            });
+
+            console.log(`✅ Certificate metadata saved: ${certId}`);
+
+            res.json({
+                success: true,
+                certId,
+                txHash,
+                issueDate,
+                hasDocument: !!documentPath,
+                qrCode,
+                verifyUrl: `${FRONTEND_URL}/verify/${certId}`,
+                ipfsCID,
+                message: 'Certificate metadata saved successfully'
+            });
+        } catch (error) {
+            console.error('❌ Issue Metadata error:', error);
+            if (req.file && fs.existsSync(req.file.path)) {
+                fs.unlinkSync(req.file.path);
+            }
+            res.status(500).json({
+                error: 'Internal server error during metadata issuance',
+                message: error.message,
+                stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+            });
+        }
+    }
+);
+
 // Verify certificate (public)
 app.get('/api/certificates/verify/:certId', async (req, res) => {
     try {
         const { certId } = req.params;
 
         // Get from blockchain
-        const result = await contract.verifyCertificate(certId);
+        const blockchainResult = await contract.verifyCertificate(certId);
+        const metadataCID = blockchainResult[0];
+
+        if (!metadataCID) {
+            return res.status(404).json({ exists: false, error: "Certificate not found on blockchain" });
+        }
 
         // Get from database
-        const dbCert = db.prepare('SELECT * FROM certificates WHERE certId = ?').get(certId);
+        let dbCert = await prisma.certificate.findUnique({
+            where: { certId }
+        });
 
-        // Generate QR code
+        // SELF-HEALING: If certificate exists on-chain but not in DB, sync it from IPFS
+        if (!dbCert && metadataCID) {
+            console.log(`🩹 Self-healing: Syncing certificate ${certId} from IPFS...`);
+            const metadata = await fetchFromIPFS(metadataCID);
+            if (metadata) {
+                dbCert = await prisma.certificate.create({
+                    data: {
+                        certId: metadata.certId,
+                        studentName: metadata.studentName,
+                        institution: metadata.institution,
+                        course: metadata.course,
+                        grade: metadata.grade,
+                        issueDate: metadata.issueDate,
+                        txHash: "0x0000000000000000000000000000000000000000", // placeholder as tx info isn't in metadata
+                        studentEmail: metadata.studentEmail,
+                        ipfsCID: metadataCID
+                    }
+                });
+                console.log(`✅ Sync complete for ${certId}`);
+            }
+        }
+
+        // Generate QR code for verification link
         const qrCode = await generateQRCode(certId);
 
         res.json({
             exists: true,
-            studentName: result[0],
-            course: result[1],
-            grade: result[2],
-            issueDate: Number(result[3]),
-            isRevoked: result[4],
-            hasDocument: !!(dbCert?.documentPath),
-            txHash: dbCert?.txHash || null,
+            certId: dbCert?.certId || certId,
+            studentName: dbCert?.studentName || "Unknown",
+            institution: dbCert?.institution || "SecureCert Institute",
+            course: dbCert?.course || "Unknown",
+            grade: dbCert?.grade || "N/A",
+            issueDate: dbCert?.issueDate || new Date(Number(blockchainResult[1]) * 1000).toISOString(),
+            txHash: dbCert?.txHash || "0x0",
+            isRevoked: blockchainResult[2],
+            hasDocument: !!dbCert?.documentPath,
             qrCode,
-            verifyUrl: `${FRONTEND_URL}/verify/${certId}`
+            ipfsCID: metadataCID
         });
     } catch (error) {
+        console.error('Verify error:', error);
         if (error.message.includes("Certificate does not exist")) {
-            res.json({ exists: false });
-        } else {
-            console.error('Verify error:', error);
-            res.status(500).json({ error: error.message });
+            return res.status(404).json({ exists: false, error: "Certificate not found on blockchain" });
         }
+        res.status(500).json({ error: error.message });
     }
 });
 
@@ -880,20 +1172,21 @@ app.get('/api/certificates/:certId/pdf', async (req, res) => {
 
         // Verify on blockchain
         const result = await contract.verifyCertificate(certId);
-        if (result[4]) {
+        if (result[2]) { // isRevoked is now at index 2
             return res.status(400).json({ error: 'Certificate has been revoked' });
         }
 
         // Get from database
-        const dbCert = db.prepare('SELECT * FROM certificates WHERE certId = ?').get(certId);
+        const dbCert = await prisma.certificate.findUnique({ where: { certId } });
 
         const certData = {
             certId,
-            studentName: result[0],
-            course: result[1],
-            grade: result[2],
-            issueDate: new Date(Number(result[3]) * 1000),
-            txHash: dbCert?.txHash
+            studentName: dbCert?.studentName || "Unknown",
+            institution: dbCert?.institution || "SECURECERT VERIFIED",
+            course: dbCert?.course || "Unknown",
+            grade: dbCert?.grade || "N/A",
+            issueDate: dbCert?.issueDate || new Date(Number(result[1]) * 1000), // issueDate is now at index 1
+            txHash: dbCert?.txHash || "0x0"
         };
 
         // Generate QR code and PDF
@@ -901,14 +1194,24 @@ app.get('/api/certificates/:certId/pdf', async (req, res) => {
         const pdfBytes = await generateCertificatePDF(certData, qrCode);
 
         res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader('Content-Disposition', `attachment; filename="${certId}_certificate.pdf"`);
+        if (req.query.view === 'true') {
+            res.setHeader('Content-Disposition', 'inline');
+        } else {
+            res.setHeader('Content-Disposition', `attachment; filename="${certId}_certificate.pdf"`);
+        }
         res.send(Buffer.from(pdfBytes));
     } catch (error) {
+        console.error(`❌ PDF generation error for certificate ${req.params.certId}:`, error);
+
         if (error.message.includes("Certificate does not exist")) {
-            res.status(404).json({ error: 'Certificate not found' });
+            res.status(404).json({ error: 'Certificate not found on blockchain' });
+        } else if (error.code === 'NETWORK_ERROR' || error.message.includes('network')) {
+            res.status(503).json({ error: 'Blockchain network unreachable' });
         } else {
-            console.error('PDF generation error:', error);
-            res.status(500).json({ error: error.message });
+            res.status(500).json({
+                error: 'Internal server error during PDF generation',
+                details: process.env.NODE_ENV === 'development' ? error.message : undefined
+            });
         }
     }
 });
@@ -919,11 +1222,11 @@ app.get('/api/certificates/download/:certId', async (req, res) => {
         const { certId } = req.params;
         const result = await contract.verifyCertificate(certId);
 
-        if (result[4]) {
+        if (result[2]) { // isRevoked is now at index 2
             return res.status(400).json({ error: 'Certificate has been revoked' });
         }
 
-        const dbCert = db.prepare('SELECT * FROM certificates WHERE certId = ?').get(certId);
+        const dbCert = await prisma.certificate.findUnique({ where: { certId } });
         if (!dbCert || !dbCert.documentPath) {
             return res.status(404).json({ error: 'No document found for this certificate' });
         }
@@ -989,10 +1292,18 @@ app.get('/api/certificates/download/:certId', async (req, res) => {
 
             const stampedPdfBytes = await pdfDoc.save();
             res.setHeader('Content-Type', 'application/pdf');
-            res.setHeader('Content-Disposition', `attachment; filename="stamped_${certId}.pdf"`);
+            if (req.query.view === 'true') {
+                res.setHeader('Content-Disposition', 'inline');
+            } else {
+                res.setHeader('Content-Disposition', `attachment; filename="stamped_${certId}.pdf"`);
+            }
             res.send(Buffer.from(stampedPdfBytes));
         } else {
-            res.setHeader('Content-Disposition', `attachment; filename="${certId}${ext}"`);
+            if (req.query.view === 'true') {
+                res.setHeader('Content-Disposition', 'inline');
+            } else {
+                res.setHeader('Content-Disposition', `attachment; filename="${certId}${ext}"`);
+            }
             res.sendFile(filePath);
         }
     } catch (error) {
@@ -1011,7 +1322,7 @@ app.get('/api/certificates/download/:certId', async (req, res) => {
 
 app.get('/api/admin/certificates', authenticateToken, async (req, res) => {
     try {
-        const allCerts = db.prepare('SELECT * FROM certificates ORDER BY createdAt DESC').all();
+        const allCerts = await prisma.certificate.findMany({ orderBy: { createdAt: 'desc' } });
 
         const enrichedCerts = await Promise.all(
             allCerts.map(async (cert) => {
@@ -1043,7 +1354,7 @@ app.get('/api/admin/certificates', authenticateToken, async (req, res) => {
 app.put('/api/admin/certificates/:certId', authenticateToken, upload.single('document'), async (req, res) => {
     try {
         const { certId } = req.params;
-        const dbCert = db.prepare('SELECT * FROM certificates WHERE certId = ?').get(certId);
+        const dbCert = await prisma.certificate.findUnique({ where: { certId } });
 
         if (!dbCert) {
             return res.status(404).json({ error: 'Certificate not found' });
@@ -1075,11 +1386,17 @@ app.put('/api/admin/certificates/:certId', authenticateToken, upload.single('doc
         }
 
         if (updates.length > 0) {
-            params.push(certId);
-            db.prepare(`UPDATE certificates SET ${updates.join(', ')} WHERE certId = ?`).run(...params);
+            const updateData = {};
+            if (req.body.notes !== undefined) updateData.notes = req.body.notes;
+            if (req.file) {
+                const ext = path.extname(req.file.originalname);
+                updateData.documentPath = `${certId}${ext}`;
+                updateData.documentOriginalName = req.file.originalname;
+            }
+            await prisma.certificate.update({ where: { certId }, data: updateData });
         }
 
-        const updatedCert = db.prepare('SELECT * FROM certificates WHERE certId = ?').get(certId);
+        const updatedCert = await prisma.certificate.findUnique({ where: { certId } });
 
         res.json({
             success: true,
@@ -1095,7 +1412,12 @@ app.put('/api/admin/certificates/:certId', authenticateToken, upload.single('doc
 app.post('/api/admin/certificates/:certId/revoke', authenticateToken, async (req, res) => {
     try {
         const { certId } = req.params;
-        await contract.verifyCertificate(certId);
+
+        // Check if exists
+        const blockchainResult = await contract.verifyCertificate(certId);
+        if (blockchainResult[2]) {
+            return res.status(400).json({ error: 'Certificate is already revoked' });
+        }
 
         const tx = await contract.revokeCertificate(certId);
         await tx.wait();
@@ -1108,8 +1430,6 @@ app.post('/api/admin/certificates/:certId/revoke', authenticateToken, async (req
     } catch (error) {
         if (error.message.includes("Certificate does not exist")) {
             res.status(404).json({ error: 'Certificate not found on blockchain' });
-        } else if (error.message.includes("Already revoked")) {
-            res.status(400).json({ error: 'Certificate is already revoked' });
         } else {
             console.error('Revoke certificate error:', error);
             res.status(500).json({ error: error.message });
@@ -1120,7 +1440,9 @@ app.post('/api/admin/certificates/:certId/revoke', authenticateToken, async (req
 app.delete('/api/admin/certificates/:certId', authenticateToken, async (req, res) => {
     try {
         const { certId } = req.params;
-        const dbCert = db.prepare('SELECT * FROM certificates WHERE certId = ?').get(certId);
+        const dbCert = await prisma.certificate.findUnique({
+            where: { certId }
+        });
 
         if (!dbCert) {
             return res.status(404).json({ error: 'Certificate not found' });
@@ -1129,26 +1451,17 @@ app.delete('/api/admin/certificates/:certId', authenticateToken, async (req, res
         // Check blockchain status and revoke if active
         try {
             const result = await contract.verifyCertificate(certId);
-            const isRevoked = result[4]; // 5th return value is isRevoked boolean
+            const isRevoked = result[2];
 
             if (!isRevoked) {
                 console.log(`⚠️ Auto-revoking certificate ${certId} before deletion...`);
                 const tx = await contract.revokeCertificate(certId);
-                console.log(`⏳ Revocation tx sent: ${tx.hash}`);
                 await tx.wait();
                 console.log(`✅ Certificate ${certId} revoked on blockchain.`);
-            } else {
-                console.log(`ℹ️ Certificate ${certId} is already revoked on blockchain.`);
             }
         } catch (blockchainError) {
-            console.error('Blockchain revocation failed during delete:', blockchainError);
-            // If it's a "Certificate does not exist" error, we can proceed with deletion
-            // otherwise we might want to stop to prevent inconsistency, or at least warn.
             if (!blockchainError.message.includes("Certificate does not exist")) {
-                return res.status(500).json({
-                    error: 'Failed to revoke certificate on blockchain. Deletion aborted.',
-                    details: blockchainError.message
-                });
+                console.error('Blockchain revocation failed during delete:', blockchainError);
             }
         }
 
@@ -1159,7 +1472,9 @@ app.delete('/api/admin/certificates/:certId', authenticateToken, async (req, res
             }
         }
 
-        db.prepare('DELETE FROM certificates WHERE certId = ?').run(certId);
+        await prisma.certificate.delete({
+            where: { certId }
+        });
 
         res.json({
             success: true,
@@ -1171,16 +1486,220 @@ app.delete('/api/admin/certificates/:certId', authenticateToken, async (req, res
     }
 });
 
+/**
+ * Admin API: Batch revoke certificates on blockchain.
+ */
+app.post('/api/admin/certificates/batch-revoke', authenticateToken, async (req, res) => {
+    try {
+        const { certIds } = req.body;
+        if (!certIds || !Array.isArray(certIds)) {
+            return res.status(400).json({ error: 'Array of certificate IDs is required' });
+        }
+
+        console.log(`🔄 Batch revoking ${certIds.length} certificates...`);
+
+        // Note: Looping individually since contract doesn't have batchRevoke
+        const results = [];
+        for (const certId of certIds) {
+            try {
+                const tx = await contract.revokeCertificate(certId);
+                await tx.wait();
+                results.push({ certId, success: true, txHash: tx.hash });
+            } catch (err) {
+                results.push({ certId, success: false, error: err.message });
+            }
+        }
+
+        res.json({
+            message: `Batch processing complete. ${results.filter(r => r.success).length} revoked, ${results.filter(r => !r.success).length} failed.`,
+            results
+        });
+    } catch (error) {
+        console.error('Batch revoke error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+/**
+ * Admin API: Batch delete certificates from database.
+ */
+app.post('/api/admin/certificates/batch-delete', authenticateToken, async (req, res) => {
+    try {
+        const { certIds } = req.body;
+        if (!certIds || !Array.isArray(certIds)) {
+            return res.status(400).json({ error: 'Array of certificate IDs is required' });
+        }
+
+        console.log(`🗑️ Batch deleting ${certIds.length} certificates...`);
+
+        // Get info about documents to delete
+        const certsToDelete = await prisma.certificate.findMany({
+            where: { certId: { in: certIds } }
+        });
+
+        // Delete physical files
+        for (const cert of certsToDelete) {
+            if (cert.documentPath) {
+                const filePath = path.join(__dirname, 'uploads', cert.documentPath);
+                if (fs.existsSync(filePath)) {
+                    fs.unlinkSync(filePath);
+                }
+            }
+        }
+
+        // Delete from database
+        const deleteResult = await prisma.certificate.deleteMany({
+            where: { certId: { in: certIds } }
+        });
+
+        res.json({
+            message: `Successfully deleted ${deleteResult.count} certificates from database.`,
+            count: deleteResult.count
+        });
+    } catch (error) {
+        console.error('Batch delete error:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Legacy endpoint (removed duplicate)
+
+// CSV Bulk Issue Endpoint
+const uploadMemory = multer({ storage: multer.memoryStorage() });
+
+/**
+ * Admin API: Bulk issuance of certificates via CSV upload.
+ * Processes certificates in batches for optimized gas efficiency.
+ */
+app.post('/api/admin/certificates/bulk-issue', authenticateToken, uploadMemory.single('csvFile'), async (req, res) => {
+    try {
+        if (!req.file) return res.status(400).json({ error: 'CSV file is required' });
+
+        const institution = req.body.institution || 'SecureCert Institute';
+        const rows = [];
+
+        // Parse CSV from buffer
+        const parser = require('stream').Readable.from(req.file.buffer);
+        parser
+            .pipe(csv())
+            .on('data', (data) => {
+                // expecting columns: studentName, course, grade, email
+                if (data.studentName && data.course && data.grade) {
+                    rows.push({
+                        studentName: data.studentName.trim(),
+                        course: data.course.trim(),
+                        grade: data.grade.trim(),
+                        email: data.email ? data.email.trim() : null
+                    });
+                }
+            })
+            .on('end', async () => {
+                if (rows.length === 0) {
+                    return res.status(400).json({ error: 'No valid rows found in CSV' });
+                }
+
+                res.status(202).json({ message: `Processing ${rows.length} certificates... This may take a moment.` });
+
+                // Process in batches of 20 to avoiding gas limit issues
+                const BATCH_SIZE = 20;
+                let processed = 0;
+
+                for (let i = 0; i < rows.length; i += BATCH_SIZE) {
+                    const batch = rows.slice(i, i + BATCH_SIZE);
+                    const b_ids = [];
+                    const b_cids = [];
+
+                    const timestamp = Date.now();
+                    for (let j = 0; j < batch.length; j++) {
+                        const certId = `CERT${timestamp}${i + j}`;
+                        const studentData = batch[j];
+
+                        // Prepare metadata
+                        const metadata = {
+                            certId,
+                            studentName: studentData.studentName,
+                            institution,
+                            course: studentData.course,
+                            grade: studentData.grade,
+                            issueDate: new Date().toISOString(),
+                            studentEmail: studentData.email
+                        };
+
+                        // Pin metadata to IPFS
+                        console.log(`📌 Pinning metadata for ${certId}...`);
+                        const metadataCID = await pinJSONToIPFS(metadata, certId);
+
+                        b_ids.push(certId);
+                        b_cids.push(metadataCID);
+                    }
+
+                    try {
+                        const feePerCert = await contract.issuanceFee();
+                        const totalBatchFee = feePerCert * BigInt(b_ids.length);
+
+                        console.log(`🔄 Minting batch ${i / BATCH_SIZE + 1} (${b_ids.length} certs) - Fee: ${ethers.formatEther(totalBatchFee)} ETH...`);
+                        const tx = await contract.batchIssueCertificates(b_ids, b_cids, { value: totalBatchFee });
+                        await tx.wait();
+
+                        // DB insertion
+                        for (let j = 0; j < batch.length; j++) {
+                            const certId = b_ids[j];
+                            const studentData = batch[j];
+                            const metadataCID = b_cids[j];
+
+                            try {
+                                // Generate QR and PDF
+                                const qrCode = await generateQRCode(certId);
+                                const certData = { certId, studentName: studentData.studentName, institution, course: studentData.course, grade: studentData.grade, issueDate: new Date(), txHash: tx.hash };
+                                const pdfBytes = await generateCertificatePDF(certData, qrCode);
+
+                                // Pin PDF to IPFS
+                                const ipfsCID = await pinToIPFS(Buffer.from(pdfBytes), certId);
+
+                                // Save to database
+                                await prisma.certificate.create({
+                                    data: {
+                                        certId,
+                                        studentName: studentData.studentName,
+                                        institution,
+                                        course: studentData.course,
+                                        grade: studentData.grade,
+                                        issueDate: new Date().toISOString(),
+                                        txHash: tx.hash,
+                                        studentEmail: studentData.email,
+                                        ipfsCID
+                                    }
+                                });
+
+                                processed++;
+                            } catch (itemErr) {
+                                console.error(`Error processing individual certificate ${certId}:`, itemErr);
+                            }
+                        }
+                    } catch (batchErr) {
+                        console.error('Batch error:', batchErr);
+                    }
+                }
+                console.log(`✅ Bulk issuance complete: ${processed} credentials minted`);
+            });
+    } catch (error) {
+        console.error('Bulk issue error:', error);
+        if (!res.headersSent) {
+            res.status(500).json({ error: error.message });
+        }
+    }
+});
+
 app.get('/api/admin/stats', authenticateToken, async (req, res) => {
     try {
-        const allCerts = db.prepare('SELECT * FROM certificates').all();
+        const allCerts = await prisma.certificate.findMany();
         let revokedCount = 0;
         let validCount = 0;
 
         for (const cert of allCerts) {
             try {
                 const result = await contract.verifyCertificate(cert.certId);
-                if (result[4]) {
+                if (result[2]) { // isRevoked
                     revokedCount++;
                 } else {
                     validCount++;
@@ -1203,8 +1722,8 @@ app.get('/api/admin/stats', authenticateToken, async (req, res) => {
 });
 
 // Legacy endpoint
-app.get('/api/certificates', (req, res) => {
-    const certs = db.prepare('SELECT * FROM certificates ORDER BY createdAt DESC').all();
+app.get('/api/certificates', async (req, res) => {
+    const certs = await prisma.certificate.findMany({ orderBy: { createdAt: 'desc' } });
     res.json(certs);
 });
 
@@ -1213,7 +1732,9 @@ app.use(errorHandler);
 
 // Start server
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+console.log(`Starting server on port ${PORT}...`);
+
+const server = app.listen(PORT, () => {
     console.log('\n' + '='.repeat(50));
     console.log('🚀 Certificate Verification Server Started');
     console.log('='.repeat(50));
@@ -1221,19 +1742,8 @@ app.listen(PORT, () => {
     console.log(`🌐 Frontend: ${process.env.FRONTEND_URL}`);
     console.log(`⛓️  Blockchain: ${process.env.RPC_URL}`);
     console.log(`📜 Contract: ${process.env.CONTRACT_ADDRESS}`);
-    console.log(`💾 Database: ${dbPath}`);
     console.log('='.repeat(50) + '\n');
+    console.log('made with love by TIFE');
+    console.log(`💾 Database: Connected (Prisma)`);
 });
 
-// Graceful shutdown
-process.on('SIGTERM', () => {
-    console.log('\n⚠️  SIGTERM received, shutting down backend...');
-    db.close();
-    process.exit(0);
-});
-
-process.on('SIGINT', () => {
-    console.log('\n⚠️  Signal received, shutting down backend...');
-    db.close();
-    process.exit(0);
-});
