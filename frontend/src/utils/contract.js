@@ -30,17 +30,13 @@ export const getContractWithProvider = (provider) => {
 export const checkAuthorization = async (provider, address) => {
     try {
         const contract = getContractWithProvider(provider);
-        const isInst = await contract.authorizedInstitutions(address);
+        const [isInst, ownerAddr] = await Promise.all([
+            contract.authorizedInstitutions(address).catch(() => false),
+            contract.owner().catch(() => null),
+        ]);
         if (isInst) return true;
-
-        // Fallback: Check if the address is the contract owner
-        // The contract allows the owner to issue certificates even if not in authorizedInstitutions
-        try {
-            const owner = await contract.owner();
-            return address.toLowerCase() === owner.toLowerCase();
-        } catch (ownerErr) {
-            return false;
-        }
+        if (ownerAddr && address.toLowerCase() === ownerAddr.toLowerCase()) return true;
+        return false;
     } catch (error) {
         console.error("Failed to check authorization:", error);
         return false;

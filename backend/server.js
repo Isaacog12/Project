@@ -6,11 +6,12 @@ const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
-const { body, validationResult } = require('express-validator');
+const { body, param, query, validationResult } = require('express-validator');
 const { ethers } = require('ethers');
 const multer = require('multer');
 const path = require('path');
 const fs = require('fs');
+const fsp = fs.promises;
 const { PDFDocument, rgb, StandardFonts } = require('pdf-lib');
 const jwt = require('jsonwebtoken');
 const { PrismaClient } = require('@prisma/client');
@@ -19,12 +20,11 @@ const QRCode = require('qrcode');
 const csv = require('csv-parser');
 const axios = require('axios');
 const FormData = require('form-data');
+const crypto = require('crypto');
 
 
 // ============================================================
 // SECTION 1: ENVIRONMENT VALIDATION
-// Ensures all required .env variables are present before
-// the app starts. Exits with a clear error if any are missing.
 // ============================================================
 
 const REQUIRED_ENV_VARS = [
@@ -42,37 +42,44 @@ const missingVars = REQUIRED_ENV_VARS.filter(v => !process.env[v]);
 if (missingVars.length > 0) {
     console.error('❌ Missing required environment variables:');
     missingVars.forEach(v => console.error(`   - ${v}`));
-    console.error('\nPlease check your .env file and ensure all required variables are set.');
+    process.exit(1);
+}
+
+// Warn about weak JWT secret in production
+if (process.env.NODE_ENV === 'production' && process.env.JWT_SECRET.length < 32) {
+    console.error('❌ JWT_SECRET must be at least 32 characters in production.');
     process.exit(1);
 }
 
 console.log('✅ Environment variables validated');
 
-const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:3000';
+const FRONTEND_URL = process.env.FRONTEND_URL;
+const IS_PROD = process.env.NODE_ENV === 'production';
 
 
 // ============================================================
 // SECTION 2: EXPRESS APP SETUP
-// Configures middleware: security headers, CORS, body parsing,
-// rate limiting, and request logging.
 // ============================================================
 
 const app = express();
 
-// --- 0. PRE-MIDDLEWARE LOGGER & CORS ---
-// Ensure CORS is handled before security headers and rate limits
 app.use((req, _res, next) => {
     console.log(`[PRE-CORS] ${req.method} ${req.path} from ${req.headers.origin || 'unknown origin'}`);
     next();
 });
 
+// CORS: tighter in production — allow only the configured frontend origin
 app.use(cors({
-    origin: FRONTEND_URL,
+    origin: (origin, callback) => {
+        // Allow requests with no origin (mobile apps, curl, server-to-server)
+        if (!origin) return callback(null, true);
+        if (origin === FRONTEND_URL) return callback(null, true);
+        callback(new Error(`CORS policy: origin "${origin}" not allowed`));
+    },
     credentials: true,
-    optionsSuccessStatus: 200 // Some legacy browsers choke on 204
+    optionsSuccessStatus: 200,
 }));
 
-// --- 1. SECURITY HEADERS ---
 app.use(helmet({
     contentSecurityPolicy: {
         directives: {
@@ -82,34 +89,42 @@ app.use(helmet({
             imgSrc: ["'self'", 'data:', 'https:'],
         },
     },
+    // Add HSTS in production
+    hsts: IS_PROD ? { maxAge: 31536000, includeSubDomains: true } : false,
 }));
 
-// --- Body parsing: support JSON and URL-encoded up to 10 MB ---
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// --- General rate limiter: 100 requests per 15 minutes per IP ---
+// General limiter
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 100,
-    message: 'Too many requests from this IP, please try again later.',
+    message: { error: 'Too many requests from this IP, please try again later.' },
     standardHeaders: true,
     legacyHeaders: false,
-    skip: (req) => req.method === 'OPTIONS', // Don't rate limit preflight
+    skip: (req) => req.method === 'OPTIONS',
 });
 
-// --- Auth-specific rate limiter: 5 login attempts per 15 minutes ---
+// Auth limiter — stricter
 const authLimiter = rateLimit({
     windowMs: 15 * 60 * 1000,
     max: 5,
-    message: 'Too many login attempts, please try again later.',
+    message: { error: 'Too many login attempts, please try again later.' },
     skipSuccessfulRequests: true,
-    skip: (req) => req.method === 'OPTIONS', // Don't rate limit preflight
+    skip: (req) => req.method === 'OPTIONS',
+});
+
+// Issuance limiter — prevents spam-minting
+const issuanceLimiter = rateLimit({
+    windowMs: 60 * 60 * 1000, // 1 hour
+    max: 20,
+    message: { error: 'Certificate issuance rate limit reached. Please try again later.' },
+    skip: (req) => req.method === 'OPTIONS',
 });
 
 app.use('/api/', limiter);
 
-// --- Request logger: prints method and path with a timestamp ---
 app.use((req, _res, next) => {
     console.log(`[${new Date().toISOString()}] ${req.method} ${req.path}`);
     next();
@@ -118,31 +133,31 @@ app.use((req, _res, next) => {
 
 // ============================================================
 // SECTION 3: DATABASE SETUP
-// Uses Prisma ORM with the better-sqlite3 adapter for a local
-// SQLite database. The `prisma` client is used for all DB ops.
 // ============================================================
 
 const { PrismaBetterSqlite3 } = require('@prisma/adapter-better-sqlite3');
 const dbUrl = process.env.DATABASE_URL || 'file:./dev.db';
 const rawDb = new Database(dbUrl.replace('file:', ''));
+
+// Enable WAL mode for better concurrent read performance with SQLite
+rawDb.pragma('journal_mode = WAL');
+rawDb.pragma('foreign_keys = ON');
+
 const adapter = new PrismaBetterSqlite3({ url: dbUrl });
 const prisma = new PrismaClient({ adapter });
 
-console.log('✅ Prisma Client initialized with better-sqlite3 adapter');
+console.log('✅ Prisma Client initialized with better-sqlite3 adapter (WAL mode)');
 
 
 // ============================================================
 // SECTION 4: IPFS HELPERS (Pinata)
-// Functions for pinning files and JSON metadata to IPFS via
-// Pinata. Requires PINATA_API_KEY and PINATA_SECRET_API_KEY.
 // ============================================================
 
 /**
- * Pins a PDF buffer to IPFS using the Pinata service.
- *
- * @param {Buffer} pdfBuffer - The PDF content to upload.
- * @param {string} certId    - Used as the filename on IPFS.
- * @returns {Promise<string|null>} The IPFS CID, or null on failure.
+ * Pins a PDF buffer to IPFS via Pinata.
+ * @param {Buffer} pdfBuffer
+ * @param {string} certId
+ * @returns {Promise<string|null>} IPFS CID or null on failure
  */
 async function pinToIPFS(pdfBuffer, certId) {
     const { PINATA_API_KEY, PINATA_SECRET_API_KEY } = process.env;
@@ -158,14 +173,19 @@ async function pinToIPFS(pdfBuffer, certId) {
             contentType: 'application/pdf',
         });
 
-        const response = await axios.post('https://api.pinata.cloud/pinning/pinFileToIPFS', formData, {
-            maxBodyLength: Infinity,
-            headers: {
-                'Content-Type': `multipart/form-data; boundary=${formData._boundary}`,
-                'pinata_api_key': PINATA_API_KEY,
-                'pinata_secret_api_key': PINATA_SECRET_API_KEY,
-            },
-        });
+        const response = await axios.post(
+            'https://api.pinata.cloud/pinning/pinFileToIPFS',
+            formData,
+            {
+                maxBodyLength: Infinity,
+                timeout: 30_000,
+                headers: {
+                    'Content-Type': `multipart/form-data; boundary=${formData._boundary}`,
+                    'pinata_api_key': PINATA_API_KEY,
+                    'pinata_secret_api_key': PINATA_SECRET_API_KEY,
+                },
+            }
+        );
 
         console.log(`📌 Pinned PDF ${certId} to IPFS: ${response.data.IpfsHash}`);
         return response.data.IpfsHash;
@@ -176,11 +196,10 @@ async function pinToIPFS(pdfBuffer, certId) {
 }
 
 /**
- * Pins a JSON metadata object to IPFS using the Pinata service.
- *
- * @param {object} metadata - The certificate metadata to upload.
- * @param {string} certId   - Used to name the pin on Pinata.
- * @returns {Promise<string|null>} The IPFS CID, or null on failure.
+ * Pins a JSON metadata object to IPFS via Pinata.
+ * @param {object} metadata
+ * @param {string} certId
+ * @returns {Promise<string|null>} IPFS CID or null on failure
  */
 async function pinJSONToIPFS(metadata, certId) {
     const { PINATA_API_KEY, PINATA_SECRET_API_KEY } = process.env;
@@ -197,6 +216,7 @@ async function pinJSONToIPFS(metadata, certId) {
                 pinataMetadata: { name: `${certId}_metadata.json` },
             },
             {
+                timeout: 15_000,
                 headers: {
                     'pinata_api_key': PINATA_API_KEY,
                     'pinata_secret_api_key': PINATA_SECRET_API_KEY,
@@ -213,17 +233,24 @@ async function pinJSONToIPFS(metadata, certId) {
 }
 
 /**
- * Fetches and parses a JSON object from IPFS via the Pinata gateway.
- * Returns null for mock CIDs (used in dev/test) or on network failure.
- *
- * @param {string} cid - The IPFS content identifier.
- * @returns {Promise<object|null>} Parsed JSON object, or null.
+ * Fetches a JSON object from IPFS via the Pinata gateway.
+ * @param {string} cid
+ * @returns {Promise<object|null>}
  */
 async function fetchFromIPFS(cid) {
-    if (cid.startsWith('mock-')) return null;
+    if (!cid || cid.startsWith('mock-')) return null;
+
+    // Validate CID format (basic check: CIDv0 starts with Qm, CIDv1 is longer)
+    if (!/^(Qm[1-9A-HJ-NP-Za-km-z]{44}|b[A-Za-z2-7]{58,})$/.test(cid)) {
+        console.warn(`⚠️ Skipping IPFS fetch: invalid CID format "${cid}"`);
+        return null;
+    }
 
     try {
-        const response = await axios.get(`https://gateway.pinata.cloud/ipfs/${cid}`, { timeout: 5000 });
+        const response = await axios.get(
+            `https://gateway.pinata.cloud/ipfs/${cid}`,
+            { timeout: 8_000 }
+        );
         return response.data;
     } catch (error) {
         console.error(`❌ Failed to fetch from IPFS (${cid}):`, error.message);
@@ -234,69 +261,93 @@ async function fetchFromIPFS(cid) {
 
 // ============================================================
 // SECTION 5: FILE UPLOAD SETUP (Multer)
-// Handles multipart/form-data uploads.
-// Files are saved to /uploads with a temp prefix until
-// processed, then renamed to the certificate ID.
 // ============================================================
 
-// Ensure required directories exist at startup
 const UPLOADS_DIR = path.join(__dirname, 'uploads');
 const CACHE_DIR = path.join(UPLOADS_DIR, 'cache');
 [UPLOADS_DIR, CACHE_DIR].forEach(dir => {
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
+/**
+ * Validates a file's magic bytes to confirm the declared MIME type.
+ * Prevents extension-spoofing attacks.
+ */
+async function validateFileMagicBytes(filePath, mimetype) {
+    const handle = await fsp.open(filePath, 'r');
+    const buffer = Buffer.alloc(8);
+    await handle.read(buffer, 0, 8, 0);
+    await handle.close();
+
+    const hex = buffer.toString('hex').toUpperCase();
+
+    if (mimetype === 'application/pdf' && hex.startsWith('255044462D')) return true; // %PDF-
+    if (mimetype === 'image/png' && hex.startsWith('89504E47')) return true;          // PNG
+    if (mimetype === 'image/jpeg' && (hex.startsWith('FFD8FF'))) return true;          // JPEG
+
+    return false;
+}
+
 const diskStorage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, UPLOADS_DIR);
-    },
+    destination: (_req, _file, cb) => cb(null, UPLOADS_DIR),
     filename: (_req, file, cb) => {
-        cb(null, `temp_${Date.now()}${path.extname(file.originalname)}`);
+        // Use a cryptographically random name to prevent path traversal or collisions
+        const randomName = crypto.randomBytes(16).toString('hex');
+        cb(null, `tmp_${randomName}${path.extname(file.originalname).toLowerCase()}`);
     },
 });
 
-/** Disk-backed multer instance for document uploads (PDF/PNG/JPEG, max 10 MB). */
+const ALLOWED_MIME_TYPES = new Set(['application/pdf', 'image/png', 'image/jpeg']);
+const ALLOWED_EXTENSIONS = new Set(['.pdf', '.png', '.jpg', '.jpeg']);
+
+/** Disk-backed multer for document uploads (PDF/PNG/JPEG, max 10 MB). */
 const upload = multer({
     storage: diskStorage,
     limits: { fileSize: 10 * 1024 * 1024 },
     fileFilter: (_req, file, cb) => {
-        const allowed = ['application/pdf', 'image/png', 'image/jpeg'];
-        if (allowed.includes(file.mimetype)) {
+        const ext = path.extname(file.originalname).toLowerCase();
+        if (ALLOWED_MIME_TYPES.has(file.mimetype) && ALLOWED_EXTENSIONS.has(ext)) {
             cb(null, true);
         } else {
-            cb(new Error('Only PDF, PNG, and JPEG files are allowed'));
+            cb(Object.assign(new Error('Only PDF, PNG, and JPEG files are allowed'), { status: 400 }));
         }
     },
 });
 
-/** In-memory multer instance used for CSV bulk import. */
-const uploadMemory = multer({ storage: multer.memoryStorage() });
+/** In-memory multer for CSV bulk import. */
+const uploadMemory = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 5 * 1024 * 1024 }, // 5 MB cap for CSVs
+    fileFilter: (_req, file, cb) => {
+        if (file.mimetype === 'text/csv' || path.extname(file.originalname).toLowerCase() === '.csv') {
+            cb(null, true);
+        } else {
+            cb(Object.assign(new Error('Only CSV files are accepted for bulk import'), { status: 400 }));
+        }
+    },
+});
+
+/** Safely removes a file, suppressing errors if it doesn't exist. */
+async function safeUnlink(filePath) {
+    try { await fsp.unlink(filePath); } catch { /* ignore */ }
+}
 
 
 // ============================================================
 // SECTION 6: BLOCKCHAIN SETUP
-// Connects to an Ethereum-compatible network using ethers.js.
-// A wallet (funded with the PRIVATE_KEY) signs all transactions.
-// The contract ABI mirrors the deployed SecureCert smart contract.
 // ============================================================
 
-// Use a custom FetchRequest to configure a 120-second timeout,
-// necessary for slow or congested networks.
 const fetchReq = new ethers.FetchRequest(process.env.RPC_URL);
 fetchReq.timeout = 120_000;
 
 const provider = new ethers.JsonRpcProvider(
     fetchReq,
-    undefined,        // Auto-detect network
+    undefined,
     { staticNetwork: true }
 );
 
 const wallet = new ethers.Wallet(process.env.PRIVATE_KEY, provider);
 
-/**
- * ABI for the deployed SecureCert smart contract.
- * Only the functions we call from the backend are listed here.
- */
 const CONTRACT_ABI = [
     'function issueCertificate(string certId, string metadataCID) external payable',
     'function batchIssueCertificates(string[] certIds, string[] metadataCIDs) external payable',
@@ -308,50 +359,101 @@ const CONTRACT_ABI = [
 
 const contract = new ethers.Contract(process.env.CONTRACT_ADDRESS, CONTRACT_ABI, wallet);
 
+const CHAIN_BATCH_SIZE = 150;
 
-// ============================================================
-// SECTION 7: ASSET PRELOADING
-// Attempts to read logo files (logo1.jpg, logo2.jpg) from the
-// /assets directory into memory at startup for fast PDF embedding.
-// Non-fatal: server continues if assets are missing.
-// ============================================================
+/**
+ * Verifies certificates in chunked batches to stay within RPC payload limits.
+ */
+async function batchVerifyCertificatesChunked(certIds) {
+    if (certIds.length === 0) return [[], [], []];
 
-const logoBuffers = {};
+    const metadataCIDs = [];
+    const issuedAts = [];
+    const isRevokedStatuses = [];
 
-try {
-    const assetsDir = path.join(__dirname, 'assets');
-    if (fs.existsSync(assetsDir)) {
-        for (const idx of [1, 2]) {
-            const logoPath = path.join(assetsDir, `logo${idx}.jpg`);
-            if (fs.existsSync(logoPath)) {
-                logoBuffers[idx] = fs.readFileSync(logoPath);
-            }
-        }
-        console.log('✅ Asset preloading system initialized');
-    } else {
-        console.warn('⚠️ Assets directory not found — logos will be skipped');
+    for (let i = 0; i < certIds.length; i += CHAIN_BATCH_SIZE) {
+        const slice = certIds.slice(i, i + CHAIN_BATCH_SIZE);
+        const [m, t, r] = await contract.batchVerifyCertificates(slice);
+        metadataCIDs.push(...m);
+        issuedAts.push(...t);
+        isRevokedStatuses.push(...r);
     }
-} catch (error) {
-    console.error('❌ Error preloading assets:', error.message);
+
+    return [metadataCIDs, issuedAts, isRevokedStatuses];
+}
+
+/**
+ * Normalises a raw grade string into a consistent chart label.
+ */
+function chartGradeLabel(grade) {
+    const g = String(grade || '');
+    if (g.includes('First Class')) return 'First Class';
+    if (g.includes('Upper')) return 'Second Class Upper';
+    if (g.includes('Lower')) return 'Second Class Lower';
+    if (g.includes('Third')) return 'Third Class';
+    if (g.includes('Pass')) return 'Pass';
+    return g || 'Other';
+}
+
+/**
+ * Runs async tasks with a fixed concurrency ceiling.
+ * @template T, R
+ * @param {number} concurrency
+ * @param {T[]} items
+ * @param {(item: T, index: number) => Promise<R>} fn
+ * @returns {Promise<R[]>}
+ */
+async function asyncPool(concurrency, items, fn) {
+    if (items.length === 0) return [];
+    const results = new Array(items.length);
+    let nextIndex = 0;
+    const worker = async () => {
+        while (true) {
+            const i = nextIndex++;
+            if (i >= items.length) break;
+            results[i] = await fn(items[i], i);
+        }
+    };
+    await Promise.all(Array.from({ length: Math.min(concurrency, items.length) }, worker));
+    return results;
 }
 
 
 // ============================================================
+// SECTION 7: ASSET PRELOADING
+// ============================================================
+
+const logoBuffers = {};
+
+(async () => {
+    try {
+        const assetsDir = path.join(__dirname, 'assets');
+        if (!fs.existsSync(assetsDir)) {
+            console.warn('⚠️ Assets directory not found — logos will be skipped');
+            return;
+        }
+        for (const idx of [1, 2]) {
+            const logoPath = path.join(assetsDir, `logo${idx}.jpg`);
+            if (fs.existsSync(logoPath)) logoBuffers[idx] = await fsp.readFile(logoPath);
+        }
+        console.log('✅ Asset preloading complete');
+    } catch (error) {
+        console.error('❌ Error preloading assets:', error.message);
+    }
+})();
+
+
+// ============================================================
 // SECTION 8: CERTIFICATE HELPERS
-// Core functions for QR code generation and PDF certificate
-// creation. Called during issuance and download endpoints.
 // ============================================================
 
 /**
- * Generates a QR code as a base64 PNG data URL.
- * The QR code encodes the public verification URL for the certificate.
- *
- * @param {string} certId - The certificate ID.
- * @returns {Promise<string>} Base64 data URL string (image/png).
+ * Generates a QR code data URL encoding the public verification URL.
+ * @param {string} certId
+ * @returns {Promise<string>} base64 PNG data URL
  */
 async function generateQRCode(certId) {
-    const verifyUrl = `${FRONTEND_URL}/verify/${certId}`;
-    return QRCode.toDataURL(verifyUrl, {
+    return QRCode.toDataURL(`${FRONTEND_URL}/verify/${encodeURIComponent(certId)}`, {
         width: 200,
         margin: 2,
         color: { dark: '#1a365d', light: '#ffffff' },
@@ -359,74 +461,85 @@ async function generateQRCode(certId) {
 }
 
 /**
- * Generates a styled A4 landscape certificate PDF.
- * Includes: institution name, student name, course, grade,
- * issue date, blockchain TX reference, QR code, seal, and watermark.
+ * Returns the stored QR code for a cert, or generates and persists one.
+ * @param {string} certId
+ * @param {object|null} dbCert
+ * @returns {Promise<string>} QR code data URL
+ */
+async function resolveOrPersistQrCode(certId, dbCert) {
+    if (dbCert?.qrCode) return dbCert.qrCode;
+
+    const qr = await generateQRCode(certId);
+
+    if (dbCert?.certId) {
+        prisma.certificate
+            .update({ where: { certId: dbCert.certId }, data: { qrCode: qr } })
+            .catch(e => console.warn(`Could not persist QR for ${certId}:`, e.message));
+    }
+
+    return qr;
+}
+
+/**
+ * Generates a styled A4-landscape certificate PDF.
+ * Results are cached to disk for subsequent downloads.
  *
- * @param {object} certData              - Certificate details.
- * @param {string} certData.certId       - Unique certificate ID.
- * @param {string} certData.studentName  - Recipient's full name.
- * @param {string} certData.institution  - Issuing institution name.
- * @param {string} certData.course       - Course or program name.
- * @param {string} certData.grade        - Grade or result.
- * @param {Date}   certData.issueDate    - Date of issuance.
- * @param {string} [certData.txHash]     - Blockchain transaction hash.
- * @param {string} qrCodeDataUrl         - QR code as a base64 data URL.
- * @returns {Promise<Uint8Array>} Raw PDF bytes ready to be saved or streamed.
+ * @param {object} certData
+ * @param {string} qrCodeDataUrl
+ * @returns {Promise<Buffer>}
  */
 async function generateCertificatePDF(certData, qrCodeDataUrl) {
     const cachePath = path.join(CACHE_DIR, `${certData.certId}_cert.pdf`);
 
-    // --- Performance Optimization: Return cached PDF if it exists ---
-    if (fs.existsSync(cachePath)) {
-        return fs.readFileSync(cachePath);
+    try {
+        await fsp.access(cachePath);
+        return fsp.readFile(cachePath);
+    } catch {
+        // Cache miss — generate below
     }
 
     const pdfDoc = await PDFDocument.create();
     const page = pdfDoc.addPage([842, 595]); // A4 Landscape (points)
-
     const { width, height } = page.getSize();
 
-    // --- Embed fonts ---
     const helvetica = await pdfDoc.embedFont(StandardFonts.Helvetica);
     const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
     const timesBold = await pdfDoc.embedFont(StandardFonts.TimesRomanBold);
     const timesItalic = await pdfDoc.embedFont(StandardFonts.TimesRomanItalic);
 
-    // --- Brand colors ---
-    const Green = rgb(0.04, 0.29, 0.20); // SecureCert brand green
+    const Green = rgb(0.04, 0.29, 0.20);
     const goldColor = rgb(0.72, 0.53, 0.04);
     const darkGray = rgb(0.2, 0.2, 0.2);
 
-    // --- Attempt to load institution-specific logo ---
+    // Try to load an institution-specific logo
     let logoImage = null;
     try {
         const assetsDir = path.join(__dirname, 'assets');
         for (const ext of ['.png', '.jpg', '.jpeg']) {
             const logoPath = path.join(assetsDir, `${certData.institution}${ext}`);
-            if (fs.existsSync(logoPath)) {
-                const logoBytes = fs.readFileSync(logoPath);
+            try {
+                await fsp.access(logoPath);
+                const logoBytes = await fsp.readFile(logoPath);
                 logoImage = ext === '.png'
                     ? await pdfDoc.embedPng(logoBytes)
                     : await pdfDoc.embedJpg(logoBytes);
                 break;
-            }
+            } catch { /* try next extension */ }
         }
     } catch (error) {
         console.warn(`⚠️ Could not load logo for "${certData.institution}":`, error.message);
     }
 
-    // --- Background watermark (faint logo centered on page) ---
+    // Background watermark
     if (logoImage) {
         try {
-            const aspectRatio = logoImage.width / logoImage.height;
-            const targetHeight = height * 0.5;
-            const targetWidth = targetHeight * aspectRatio;
+            const ar = logoImage.width / logoImage.height;
+            const wh = height * 0.5;
             page.drawImage(logoImage, {
-                x: width / 2 - targetWidth / 2,
-                y: height / 2 - targetHeight / 2,
-                width: targetWidth,
-                height: targetHeight,
+                x: width / 2 - (wh * ar) / 2,
+                y: height / 2 - wh / 2,
+                width: wh * ar,
+                height: wh,
                 opacity: 0.05,
             });
         } catch (e) {
@@ -434,106 +547,102 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
         }
     }
 
-    // --- Decorative border: outer (gold) and inner (green) ---
-    const margin = 30;
-    const innerMargin = 45;
+    // Decorative borders
+    const margin = 30, innerMargin = 45;
     page.drawRectangle({ x: margin, y: margin, width: width - margin * 2, height: height - margin * 2, borderColor: goldColor, borderWidth: 3 });
     page.drawRectangle({ x: innerMargin, y: innerMargin, width: width - innerMargin * 2, height: height - innerMargin * 2, borderColor: Green, borderWidth: 2 });
 
-    // --- Corner ornaments: gold outer square + green inner square ---
-    const ornSize = 15;
-    const ornOffset = 38;
+    // Corner ornaments
+    const ornSize = 15, ornOffset = 38;
     [
-        { x: ornOffset, y: height - ornOffset },         // Top-left
-        { x: width - ornOffset - ornSize, y: height - ornOffset },     // Top-right
-        { x: ornOffset, y: ornOffset },                  // Bottom-left
-        { x: width - ornOffset - ornSize, y: ornOffset },              // Bottom-right
+        { x: ornOffset, y: height - ornOffset },
+        { x: width - ornOffset - ornSize, y: height - ornOffset },
+        { x: ornOffset, y: ornOffset },
+        { x: width - ornOffset - ornSize, y: ornOffset },
     ].forEach(({ x, y }) => {
         page.drawRectangle({ x, y, width: ornSize, height: ornSize, color: goldColor });
         page.drawRectangle({ x: x + 3, y: y - 3, width: ornSize - 6, height: ornSize - 6, color: Green });
     });
 
-    // --- Header: institution logo (if available) ---
+    // Header logo
     if (logoImage) {
         try {
-            const aspectRatio = logoImage.width / logoImage.height;
-            const logoHeight = 70;
-            const logoWidth = logoHeight * aspectRatio;
-            page.drawImage(logoImage, { x: width / 2 - logoWidth / 2, y: height - 120, width: logoWidth, height: logoHeight });
+            const ar = logoImage.width / logoImage.height;
+            const lh = 70;
+            page.drawImage(logoImage, { x: width / 2 - (lh * ar) / 2, y: height - 120, width: lh * ar, height: lh });
         } catch (e) {
             console.error('Error drawing header logo:', e.message);
         }
     }
 
-    // --- Institution name ---
+    // Institution name
     const institutionText = String(certData.institution || 'SECURECERT VERIFIED').toUpperCase();
-    const institutionSize = 18;
-    const institutionWidth = timesBold.widthOfTextAtSize(institutionText, institutionSize);
-    page.drawText(institutionText, { x: width / 2 - institutionWidth / 2, y: height - 135, size: institutionSize, font: timesBold, color: Green });
-
-    // Decorative underline beneath institution name
+    const instSize = 18;
+    page.drawText(institutionText, {
+        x: width / 2 - timesBold.widthOfTextAtSize(institutionText, instSize) / 2,
+        y: height - 135,
+        size: instSize,
+        font: timesBold,
+        color: Green,
+    });
     page.drawLine({ start: { x: width / 2 - 100, y: height - 145 }, end: { x: width / 2 + 100, y: height - 145 }, thickness: 1, color: goldColor });
 
-    // --- Award title ---
+    // Award title
     const titleText = 'AWARD OF EXCELLENCE';
     const titleSize = 32;
-    const titleWidth = timesBold.widthOfTextAtSize(titleText, titleSize);
-    page.drawText(titleText, { x: width / 2 - titleWidth / 2, y: height - 200, size: titleSize, font: timesBold, color: Green });
+    const titleW = timesBold.widthOfTextAtSize(titleText, titleSize);
+    page.drawText(titleText, { x: width / 2 - titleW / 2, y: height - 200, size: titleSize, font: timesBold, color: Green });
 
-    // Short decorative lines flanking the title
     const titleLineY = height - 210;
-    page.drawLine({ start: { x: width / 2 - titleWidth / 2 - 30, y: titleLineY }, end: { x: width / 2 - titleWidth / 2 - 10, y: titleLineY }, thickness: 2, color: goldColor });
-    page.drawLine({ start: { x: width / 2 + titleWidth / 2 + 10, y: titleLineY }, end: { x: width / 2 + titleWidth / 2 + 30, y: titleLineY }, thickness: 2, color: goldColor });
+    page.drawLine({ start: { x: width / 2 - titleW / 2 - 30, y: titleLineY }, end: { x: width / 2 - titleW / 2 - 10, y: titleLineY }, thickness: 2, color: goldColor });
+    page.drawLine({ start: { x: width / 2 + titleW / 2 + 10, y: titleLineY }, end: { x: width / 2 + titleW / 2 + 30, y: titleLineY }, thickness: 2, color: goldColor });
 
-    // --- "This is to certify that" ---
     const certifyText = 'This is to certify that';
-    const certifyWidth = timesItalic.widthOfTextAtSize(certifyText, 14);
-    page.drawText(certifyText, { x: width / 2 - certifyWidth / 2, y: height - 250, size: 14, font: timesItalic, color: darkGray });
+    page.drawText(certifyText, {
+        x: width / 2 - timesItalic.widthOfTextAtSize(certifyText, 14) / 2,
+        y: height - 250,
+        size: 14,
+        font: timesItalic,
+        color: darkGray,
+    });
 
-    // --- Student name (most prominent text on the certificate) ---
+    // Student name
     const studentText = certData.studentName.toUpperCase();
     const studentSize = 28;
-    const studentWidth = timesBold.widthOfTextAtSize(studentText, studentSize);
-    page.drawText(studentText, { x: width / 2 - studentWidth / 2, y: height - 290, size: studentSize, font: timesBold, color: rgb(0.5, 0.1, 0.1) });
-    page.drawLine({ start: { x: width / 2 - studentWidth / 2 - 20, y: height - 298 }, end: { x: width / 2 + studentWidth / 2 + 20, y: height - 298 }, thickness: 1.5, color: goldColor });
+    const studentW = timesBold.widthOfTextAtSize(studentText, studentSize);
+    page.drawText(studentText, { x: width / 2 - studentW / 2, y: height - 290, size: studentSize, font: timesBold, color: rgb(0.5, 0.1, 0.1) });
+    page.drawLine({ start: { x: width / 2 - studentW / 2 - 20, y: height - 298 }, end: { x: width / 2 + studentW / 2 + 20, y: height - 298 }, thickness: 1.5, color: goldColor });
 
-    // --- Achievement text ---
     const achieveText = 'has successfully completed the requirements for';
-    const achieveWidth = helvetica.widthOfTextAtSize(achieveText, 12);
-    page.drawText(achieveText, { x: width / 2 - achieveWidth / 2, y: height - 330, size: 12, font: helvetica, color: darkGray });
+    page.drawText(achieveText, { x: width / 2 - helvetica.widthOfTextAtSize(achieveText, 12) / 2, y: height - 330, size: 12, font: helvetica, color: darkGray });
 
-    // --- Course name ---
+    // Course
     const courseSize = 22;
-    const courseWidth = timesBold.widthOfTextAtSize(certData.course, courseSize);
-    page.drawText(certData.course, { x: width / 2 - courseWidth / 2, y: height - 365, size: courseSize, font: timesBold, color: Green });
+    page.drawText(certData.course, { x: width / 2 - timesBold.widthOfTextAtSize(certData.course, courseSize) / 2, y: height - 365, size: courseSize, font: timesBold, color: Green });
 
-    // --- Grade ---
+    // Grade
     const gradeText = `with a grade of ${certData.grade}`;
-    const gradeWidth = helveticaBold.widthOfTextAtSize(gradeText, 14);
-    page.drawText(gradeText, { x: width / 2 - gradeWidth / 2, y: height - 395, size: 14, font: helveticaBold, color: rgb(0, 0.6, 0.3) });
+    page.drawText(gradeText, { x: width / 2 - helveticaBold.widthOfTextAtSize(gradeText, 14) / 2, y: height - 395, size: 14, font: helveticaBold, color: rgb(0, 0.6, 0.3) });
 
-    // --- Issue date ---
+    // Issue date
     const issueDate = new Date(certData.issueDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' });
     const dateText = `Issued on ${issueDate}`;
-    const dateWidth = helvetica.widthOfTextAtSize(dateText, 11);
-    page.drawText(dateText, { x: width / 2 - dateWidth / 2, y: 180, size: 11, font: helvetica, color: darkGray });
+    page.drawText(dateText, { x: width / 2 - helvetica.widthOfTextAtSize(dateText, 11) / 2, y: 180, size: 11, font: helvetica, color: darkGray });
 
-    // --- Registrar signature line ---
+    // Registrar signature line
     const sigY = 130;
     page.drawLine({ start: { x: width / 2 - 120, y: sigY }, end: { x: width / 2 + 120, y: sigY }, thickness: 1, color: darkGray });
     const sigTitle = 'Registrar, SecureCert';
-    const sigWidth = helvetica.widthOfTextAtSize(sigTitle, 10);
-    page.drawText(sigTitle, { x: width / 2 - sigWidth / 2, y: sigY - 15, size: 10, font: helvetica, color: darkGray });
+    page.drawText(sigTitle, { x: width / 2 - helvetica.widthOfTextAtSize(sigTitle, 10) / 2, y: sigY - 15, size: 10, font: helvetica, color: darkGray });
 
-    // --- Official seal (bottom-left): two concentric circles + text ---
-    const sealX = 100;
-    const sealY = 100;
+    // Official seal
+    const sealX = 100, sealY = 100;
     page.drawCircle({ x: sealX, y: sealY, size: 35, borderColor: goldColor, borderWidth: 3 });
     page.drawCircle({ x: sealX, y: sealY, size: 27, borderColor: Green, borderWidth: 2 });
     page.drawText('OFFICIAL', { x: sealX - 20, y: sealY + 5, size: 8, font: helveticaBold, color: Green });
     page.drawText('SEAL', { x: sealX - 12, y: sealY - 5, size: 8, font: helveticaBold, color: Green });
 
-    // --- QR code (bottom-right) ---
+    // QR code
     if (qrCodeDataUrl) {
         const qrBytes = Buffer.from(qrCodeDataUrl.split(',')[1], 'base64');
         const qrImage = await pdfDoc.embedPng(qrBytes);
@@ -541,25 +650,24 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
         page.drawText('Scan to Verify', { x: width - 135, y: 60, size: 7, font: helvetica, color: darkGray });
     }
 
-    // --- Blockchain info block (bottom-left, below seal) ---
+    // Blockchain info block
     page.drawText('BLOCKCHAIN SECURED', { x: 60, y: 60, size: 8, font: helveticaBold, color: Green });
     page.drawText(`Certificate No: ${certData.certId}`, { x: 60, y: 48, size: 7, font: helvetica, color: darkGray });
     if (certData.txHash) {
         page.drawText(`TX: ${certData.txHash.substring(0, 30)}...`, { x: 60, y: 38, size: 6, font: helvetica, color: rgb(0.6, 0.6, 0.6) });
     }
 
-    // --- Verification stamp (centered black banner at very bottom) ---
+    // Verification stamp
     const stampText = `VERIFIED: ${certData.certId}`;
     const stampSize = 12;
-    const stampWidth = helveticaBold.widthOfTextAtSize(stampText, stampSize);
-    page.drawRectangle({ x: width / 2 - stampWidth / 2 - 10, y: 20, width: stampWidth + 20, height: 25, color: rgb(0, 0, 0) });
-    page.drawText(stampText, { x: width / 2 - stampWidth / 2, y: 27, size: stampSize, font: helveticaBold, color: rgb(1, 1, 1) });
+    const stampW = helveticaBold.widthOfTextAtSize(stampText, stampSize);
+    page.drawRectangle({ x: width / 2 - stampW / 2 - 10, y: 20, width: stampW + 20, height: 25, color: rgb(0, 0, 0) });
+    page.drawText(stampText, { x: width / 2 - stampW / 2, y: 27, size: stampSize, font: helveticaBold, color: rgb(1, 1, 1) });
 
-    // --- Diagonal cert ID watermark (semi-transparent, across center) ---
+    // Diagonal watermark
     const wmSize = 40;
-    const wmWidth = helveticaBold.widthOfTextAtSize(certData.certId, wmSize);
     page.drawText(certData.certId, {
-        x: width / 2 - wmWidth / 2,
+        x: width / 2 - helveticaBold.widthOfTextAtSize(certData.certId, wmSize) / 2,
         y: height / 2,
         size: wmSize,
         font: helveticaBold,
@@ -569,23 +677,16 @@ async function generateCertificatePDF(certData, qrCodeDataUrl) {
     });
 
     const pdfBytes = await pdfDoc.save();
-
-    // Cache the result for future requests
-    fs.writeFileSync(cachePath, pdfBytes);
-
+    await fsp.writeFile(cachePath, pdfBytes);
     return pdfBytes;
 }
 
 
 // ============================================================
 // SECTION 9: MIDDLEWARE
-// Reusable middleware for input validation and authentication.
 // ============================================================
 
-/**
- * Express middleware: checks express-validator results.
- * Responds with 400 and field-level error details if validation failed.
- */
+/** Responds 400 with structured field errors if express-validator found issues. */
 const handleValidationErrors = (req, res, next) => {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
@@ -597,27 +698,26 @@ const handleValidationErrors = (req, res, next) => {
     next();
 };
 
-/**
- * Express middleware: verifies the Bearer JWT in the Authorization header.
- * Attaches the decoded payload to `req.user` on success.
- * Returns 401 if no token, 403 if invalid or expired.
- */
+/** Verifies the Bearer JWT in the Authorization header. */
 const authenticateToken = (req, res, next) => {
     const authHeader = req.headers['authorization'];
-    const token = authHeader && authHeader.split(' ')[1];
+    const token = authHeader?.split(' ')[1];
 
     if (!token) return res.status(401).json({ error: 'Access token required' });
 
     jwt.verify(token, process.env.JWT_SECRET, (err, user) => {
-        if (err) return res.status(403).json({ error: 'Invalid or expired token' });
+        if (err) {
+            const message = err.name === 'TokenExpiredError' ? 'Token has expired' : 'Invalid token';
+            return res.status(403).json({ error: message });
+        }
         req.user = user;
         next();
     });
 };
 
 /**
- * Express error handler (must be registered last with app.use).
- * Handles Multer errors, custom status errors, and generic 500s.
+ * Central error handler — must be registered last.
+ * Sanitises error details in production.
  */
 const errorHandler = (err, req, res, _next) => {
     console.error('Unhandled error:', err);
@@ -627,20 +727,16 @@ const errorHandler = (err, req, res, _next) => {
         return res.status(400).json({ error: `Upload error: ${err.message}` });
     }
 
-    if (err.status) return res.status(err.status).json({ error: err.message });
-
-    res.status(500).json({
-        error: 'Internal server error',
-        message: process.env.NODE_ENV === 'development' ? err.message : undefined,
+    const status = err.status || 500;
+    res.status(status).json({
+        error: err.message || 'Internal server error',
+        ...(IS_PROD ? {} : { stack: err.stack }),
     });
 };
 
 
 // ============================================================
 // SECTION 10: HEALTH CHECK ENDPOINTS
-// Used by monitoring, load balancers, or Docker health checks.
-// GET /health  → lightweight liveness probe
-// GET /ready   → full readiness probe (checks DB + blockchain)
 // ============================================================
 
 app.get('/health', (_req, res) => {
@@ -657,7 +753,7 @@ app.get('/ready', async (_req, res) => {
         const checks = {
             database: 'checking...',
             blockchain: 'checking...',
-            contract: process.env.CONTRACT_ADDRESS
+            contract: process.env.CONTRACT_ADDRESS,
         };
 
         try {
@@ -675,7 +771,6 @@ app.get('/ready', async (_req, res) => {
         }
 
         const isReady = checks.database === 'connected' && checks.blockchain === 'connected';
-
         res.status(isReady ? 200 : 503).json({
             status: isReady ? 'ready' : 'not ready',
             checks,
@@ -689,8 +784,6 @@ app.get('/ready', async (_req, res) => {
 
 // ============================================================
 // SECTION 11: AUTH ENDPOINTS
-// POST /api/auth/login  → validates admin credentials, returns JWT
-// GET  /api/auth/verify → checks if current JWT is still valid
 // ============================================================
 
 app.post(
@@ -704,7 +797,17 @@ app.post(
     (req, res) => {
         const { username, password } = req.body;
 
-        if (username === process.env.ADMIN_USERNAME && password === process.env.ADMIN_PASSWORD) {
+        // Use timing-safe comparison to prevent timing attacks
+        const usernameMatch = crypto.timingSafeEqual(
+            Buffer.from(username),
+            Buffer.from(process.env.ADMIN_USERNAME)
+        );
+        const passwordMatch = crypto.timingSafeEqual(
+            Buffer.from(password),
+            Buffer.from(process.env.ADMIN_PASSWORD)
+        );
+
+        if (usernameMatch && passwordMatch) {
             const token = jwt.sign(
                 { username, role: 'admin' },
                 process.env.JWT_SECRET,
@@ -715,7 +818,8 @@ app.post(
         }
 
         console.warn(`❌ Failed login attempt for: ${username}`);
-        res.status(401).json({ error: 'Invalid credentials' });
+        // Introduce a small artificial delay to further blunt brute-force attempts
+        setTimeout(() => res.status(401).json({ error: 'Invalid credentials' }), 300);
     }
 );
 
@@ -726,53 +830,20 @@ app.get('/api/auth/verify', authenticateToken, (req, res) => {
 
 // ============================================================
 // SECTION 12: PUBLIC CERTIFICATE ENDPOINTS
-// These do not require authentication.
-//
-// POST /api/certificates/pin-metadata        → pin metadata to IPFS (MetaMask flow prep)
-// POST /api/certificates/issue               → full backend issuance (server signs TX)
-// POST /api/certificates/issue-metadata      → save metadata after MetaMask TX
-// GET  /api/certificates/verify/:certId      → verify a certificate (blockchain + DB)
-// GET  /api/certificates/:certId/qrcode      → return QR code for a certificate
-// GET  /api/certificates/:certId/pdf         → download generated certificate PDF
-// GET  /api/certificates/download/:certId    → download stamped original document
 // ============================================================
 
 /**
- * PIN METADATA (MetaMask pre-issuance step)
- * Pins certificate metadata to IPFS and returns the CID.
- * This CID is then passed to the MetaMask transaction by the frontend.
- */
-app.post('/api/certificates/pin-metadata', async (req, res, next) => {
-    try {
-        const { studentName, institution, course, grade, studentEmail } = req.body;
-        const certId = `CERT${Date.now()}`;
-
-        const metadata = {
-            certId, studentName, institution, course, grade,
-            issueDate: new Date().toISOString(),
-            studentEmail: studentEmail || null,
-        };
-
-        const metadataCID = await pinJSONToIPFS(metadata, certId);
-        res.json({ success: true, certId, metadataCID, metadata });
-    } catch (error) {
-        next(error);
-    }
-});
-
-/**
- * ISSUE CERTIFICATE (server-signed blockchain transaction)
- * Full issuance: pins metadata to IPFS, pays issuance fee, sends TX,
- * generates PDF, pins PDF to IPFS, saves to DB.
- * Accepts an optional document file (PDF/PNG/JPEG).
+ * PIN METADATA
+ * Pins certificate metadata to IPFS for MetaMask pre-issuance flow.
  */
 app.post(
-    '/api/certificates/issue',
-    upload.single('document'),
+    '/api/certificates/pin-metadata',
     [
         body('studentName').trim().notEmpty().isLength({ min: 2, max: 100 }).withMessage('Student name must be 2–100 characters'),
+        body('institution').trim().notEmpty().isLength({ min: 2, max: 150 }).withMessage('Institution must be 2–150 characters'),
         body('course').trim().notEmpty().isLength({ min: 2, max: 100 }).withMessage('Course must be 2–100 characters'),
         body('grade').trim().notEmpty().isLength({ min: 1, max: 50 }).withMessage('Grade must be 1–50 characters'),
+        body('studentEmail').optional().isEmail().normalizeEmail().withMessage('Invalid email address'),
     ],
     handleValidationErrors,
     async (req, res, next) => {
@@ -780,34 +851,86 @@ app.post(
             const { studentName, institution, course, grade, studentEmail } = req.body;
             const certId = `CERT${Date.now()}`;
 
+            const metadata = {
+                certId,
+                studentName,
+                institution,
+                course,
+                grade,
+                issueDate: new Date().toISOString(),
+                studentEmail: studentEmail || null,
+            };
+
+            const metadataCID = await pinJSONToIPFS(metadata, certId);
+            if (!metadataCID) {
+                return res.status(502).json({ error: 'Failed to pin metadata to IPFS. Please try again.' });
+            }
+
+            res.json({ success: true, certId, metadataCID, metadata });
+        } catch (error) {
+            next(error);
+        }
+    }
+);
+
+/**
+ * ISSUE CERTIFICATE (server-signed transaction)
+ * Pins metadata, pays fee, sends TX, generates PDF, saves to DB.
+ */
+app.post(
+    '/api/certificates/issue',
+    issuanceLimiter,
+    upload.single('document'),
+    [
+        body('studentName').trim().notEmpty().isLength({ min: 2, max: 100 }).withMessage('Student name must be 2–100 characters'),
+        body('institution').trim().notEmpty().isLength({ min: 2, max: 150 }).withMessage('Institution must be 2–150 characters'),
+        body('course').trim().notEmpty().isLength({ min: 2, max: 100 }).withMessage('Course must be 2–100 characters'),
+        body('grade').trim().notEmpty().isLength({ min: 1, max: 50 }).withMessage('Grade must be 1–50 characters'),
+        body('studentEmail').optional().isEmail().normalizeEmail().withMessage('Invalid email address'),
+    ],
+    handleValidationErrors,
+    async (req, res, next) => {
+        let tempFilePath = req.file?.path || null;
+        try {
+            const { studentName, institution, course, grade, studentEmail } = req.body;
+            const certId = `CERT${Date.now()}`;
+
             console.log(`📝 Issuing certificate for: ${studentName}`);
 
-            // Pin JSON metadata to IPFS
+            // Validate uploaded file's actual contents (not just MIME type)
+            if (req.file) {
+                const isValid = await validateFileMagicBytes(req.file.path, req.file.mimetype);
+                if (!isValid) {
+                    await safeUnlink(req.file.path);
+                    return res.status(400).json({ error: 'Uploaded file contents do not match the declared file type.' });
+                }
+            }
+
             const metadata = { certId, studentName, institution, course, grade, issueDate: new Date().toISOString(), studentEmail: studentEmail || null };
             const metadataCID = await pinJSONToIPFS(metadata, certId);
+            if (!metadataCID) {
+                return res.status(502).json({ error: 'Failed to pin metadata to IPFS. Please try again.' });
+            }
 
-            // Fetch fee and send on-chain transaction
             const issuanceFee = await contract.issuanceFee();
-            console.log(`💰 Paying issuance fee: ${ethers.formatEther(issuanceFee)} ETH`);
             const tx = await contract.issueCertificate(certId, metadataCID, { value: issuanceFee });
             await tx.wait();
 
-            // Rename uploaded document from temp name to certId-based name
+            // Rename temp file to cert-ID-based name
             let documentPath = null;
             if (req.file) {
-                const ext = path.extname(req.file.originalname);
+                const ext = path.extname(req.file.originalname).toLowerCase();
                 const newFilename = `${certId}${ext}`;
-                fs.renameSync(req.file.path, path.join(__dirname, 'uploads', newFilename));
+                await fsp.rename(req.file.path, path.join(UPLOADS_DIR, newFilename));
+                tempFilePath = null; // no longer temp
                 documentPath = newFilename;
             }
 
-            // Generate QR code, PDF, and pin PDF to IPFS
             const qrCode = await generateQRCode(certId);
             const certData = { certId, studentName, institution, course, grade, issueDate: new Date(), txHash: tx.hash };
             const pdfBytes = await generateCertificatePDF(certData, qrCode);
             const ipfsCID = await pinToIPFS(Buffer.from(pdfBytes), certId);
 
-            // Persist to database
             await prisma.certificate.create({
                 data: {
                     certId, studentName, institution, course, grade,
@@ -817,6 +940,7 @@ app.post(
                     documentOriginalName: req.file?.originalname || null,
                     studentEmail: studentEmail || null,
                     ipfsCID,
+                    qrCode,
                 },
             });
 
@@ -834,56 +958,68 @@ app.post(
                 message: 'Certificate issued successfully',
             });
         } catch (error) {
-            // Clean up temp file on failure
-            if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+            if (tempFilePath) await safeUnlink(tempFilePath);
             next(error);
         }
     }
 );
 
 /**
- * ISSUE METADATA (MetaMask-signed transaction flow)
- * Called after the frontend has already sent the blockchain transaction
- * via MetaMask. Saves metadata, generates PDF, and pins to IPFS.
+ * ISSUE METADATA (MetaMask-signed transaction)
+ * Saves metadata, generates PDF, and pins to IPFS after a frontend TX.
  */
 app.post(
     '/api/certificates/issue-metadata',
     upload.single('document'),
     [
         body('certId').trim().notEmpty().withMessage('Certificate ID is required'),
-        body('studentName').trim().notEmpty().withMessage('Student name is required'),
-        body('institution').trim().notEmpty().withMessage('Institution name is required'),
-        body('course').trim().notEmpty().withMessage('Course is required'),
-        body('grade').trim().notEmpty().withMessage('Grade is required'),
-        body('txHash').trim().notEmpty().withMessage('Transaction hash is required'),
-        body('issueDate').trim().notEmpty().withMessage('Issue date is required'),
+        body('studentName').trim().notEmpty().isLength({ min: 2, max: 100 }).withMessage('Student name is required'),
+        body('institution').trim().notEmpty().isLength({ min: 2, max: 150 }).withMessage('Institution is required'),
+        body('course').trim().notEmpty().isLength({ min: 2, max: 100 }).withMessage('Course is required'),
+        body('grade').trim().notEmpty().isLength({ min: 1, max: 50 }).withMessage('Grade is required'),
+        body('txHash').trim().notEmpty().matches(/^0x[0-9a-fA-F]{64}$/).withMessage('txHash must be a valid 32-byte hex string'),
+        body('issueDate').trim().notEmpty().isISO8601().withMessage('issueDate must be a valid ISO 8601 date'),
+        body('studentEmail').optional().isEmail().normalizeEmail().withMessage('Invalid email address'),
     ],
     handleValidationErrors,
     async (req, res, next) => {
+        let tempFilePath = req.file?.path || null;
         try {
-            console.log('📥 Received issue-metadata request:', req.body);
             let { certId, studentName, institution, course, grade, txHash, issueDate, studentEmail, metadataCID } = req.body;
 
-            // Guard: institution may occasionally arrive as an array (multipart quirk)
+            // Guard against array values from multipart quirks
             if (Array.isArray(institution)) institution = institution[0];
-            if (!institution) console.warn('⚠️ Institution field is missing from request body');
+            if (!institution) return res.status(400).json({ error: 'institution is required' });
 
-            // Handle optional document upload
+            // Validate file magic bytes
+            if (req.file) {
+                const isValid = await validateFileMagicBytes(req.file.path, req.file.mimetype);
+                if (!isValid) {
+                    await safeUnlink(req.file.path);
+                    return res.status(400).json({ error: 'Uploaded file contents do not match the declared file type.' });
+                }
+            }
+
+            // Check for duplicate certId before doing any expensive work
+            const existing = await prisma.certificate.findUnique({ where: { certId } });
+            if (existing) {
+                return res.status(409).json({ error: 'A certificate with this ID already exists.' });
+            }
+
             let documentPath = null;
             if (req.file) {
-                const ext = path.extname(req.file.originalname);
+                const ext = path.extname(req.file.originalname).toLowerCase();
                 const newFilename = `${certId}${ext}`;
-                fs.renameSync(req.file.path, path.join(__dirname, 'uploads', newFilename));
+                await fsp.rename(req.file.path, path.join(UPLOADS_DIR, newFilename));
+                tempFilePath = null;
                 documentPath = newFilename;
             }
 
-            // Generate QR code and PDF, then pin PDF to IPFS
             const qrCode = await generateQRCode(certId);
             const certData = { certId, studentName, institution, course, grade, issueDate: new Date(), txHash };
             const pdfBytes = await generateCertificatePDF(certData, qrCode);
             const ipfsCID = await pinToIPFS(Buffer.from(pdfBytes), certId);
 
-            // Persist to database
             await prisma.certificate.create({
                 data: {
                     certId, studentName, institution, course, grade,
@@ -891,6 +1027,7 @@ app.post(
                     documentOriginalName: req.file?.originalname || null,
                     studentEmail: studentEmail || null,
                     ipfsCID,
+                    qrCode,
                 },
             });
 
@@ -906,7 +1043,7 @@ app.post(
                 message: 'Certificate metadata saved successfully',
             });
         } catch (error) {
-            if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+            if (tempFilePath) await safeUnlink(tempFilePath);
             next(error);
         }
     }
@@ -914,523 +1051,624 @@ app.post(
 
 /**
  * VERIFY CERTIFICATE (public)
- * Checks the blockchain for the certificate's existence and revocation status.
- * If missing from the local DB, attempts to self-heal by syncing from IPFS.
- * Returns combined on-chain + DB data.
+ * Blockchain is the source of truth; falls back to DB if node is down.
  */
-app.get('/api/certificates/verify/:certId', async (req, res) => {
-    try {
-        const { certId } = req.params;
-
-        // Primary source of truth: blockchain
-        let metadataCID, issuedAt, isRevoked;
-        let blockchainError = null;
-
+app.get(
+    '/api/certificates/verify/:certId',
+    [param('certId').trim().notEmpty().isLength({ max: 100 }).withMessage('Invalid certificate ID')],
+    handleValidationErrors,
+    async (req, res) => {
         try {
-            [metadataCID, issuedAt, isRevoked] = await contract.verifyCertificate(certId);
-        } catch (e) {
-            console.warn(`⚠️ Blockchain verification failed for ${certId}: ${e.message}`);
-            blockchainError = e.message;
-        }
+            const { certId } = req.params;
 
-        // Secondary source: local DB (faster, richer data)
-        let dbCert = await prisma.certificate.findUnique({ where: { certId } });
+            let metadataCID, issuedAt, isRevoked;
+            let blockchainError = null;
 
-        // DEVELOPMENT FALLBACK: If blockchain node was reset but DB has the record
-        if ((!metadataCID || blockchainError) && dbCert) {
-            console.log(`💡 Dev Fallback: ${certId} verified via local database (Blockchain node may have been reset)`);
-            return res.json({
+            try {
+                [metadataCID, issuedAt, isRevoked] = await contract.verifyCertificate(certId);
+            } catch (e) {
+                console.warn(`⚠️ Blockchain verification failed for ${certId}: ${e.message}`);
+                blockchainError = e.message;
+            }
+
+            const dbCert = await prisma.certificate.findUnique({ where: { certId } });
+
+            // Dev / node-reset fallback
+            if ((!metadataCID || blockchainError) && dbCert) {
+                console.log(`💡 Dev Fallback: ${certId} verified via local database`);
+                return res.json({
+                    exists: true,
+                    verifiedBy: 'database_fallback',
+                    isLocalVerified: true,
+                    isRevoked: false,
+                    issueDate: dbCert.issueDate,
+                    certId: dbCert.certId,
+                    studentName: dbCert.studentName,
+                    institution: dbCert.institution,
+                    course: dbCert.course,
+                    grade: dbCert.grade,
+                    txHash: dbCert.txHash,
+                    ipfsCID: dbCert.ipfsCID,
+                    qrCode: dbCert.qrCode || null,
+                    message: 'Verified via local forensic registry (Blockchain node reset)',
+                });
+            }
+
+            if (!metadataCID) {
+                return res.status(404).json({ exists: false, error: 'Certificate not found on blockchain' });
+            }
+
+            // Self-healing: if DB row is missing, try to restore from IPFS
+            let syncedDbCert = dbCert;
+            if (!dbCert && metadataCID) {
+                console.log(`🩹 Self-healing: syncing ${certId} from IPFS...`);
+                const ipfsMeta = await fetchFromIPFS(metadataCID);
+                if (ipfsMeta) {
+                    try {
+                        syncedDbCert = await prisma.certificate.create({
+                            data: {
+                                certId: ipfsMeta.certId,
+                                studentName: ipfsMeta.studentName,
+                                institution: ipfsMeta.institution || 'Unknown',
+                                course: ipfsMeta.course,
+                                grade: ipfsMeta.grade,
+                                issueDate: ipfsMeta.issueDate,
+                                txHash: '0x0000000000000000000000000000000000000000',
+                                studentEmail: ipfsMeta.studentEmail || null,
+                                ipfsCID: metadataCID,
+                            },
+                        });
+                        console.log(`✅ Self-heal complete for ${certId}`);
+                    } catch (dbErr) {
+                        console.warn(`⚠️ Self-heal DB write failed for ${certId}:`, dbErr.message);
+                    }
+                }
+            }
+
+            res.json({
                 exists: true,
-                verifiedBy: 'database_fallback',
-                isLocalVerified: true,
-                isRevoked: false, // Default to false if blockchain is down
-                issueDate: dbCert.issueDate,
-                certId: dbCert.certId,
+                certId: syncedDbCert?.certId || certId,
+                studentName: syncedDbCert?.studentName || 'Unknown',
+                institution: syncedDbCert?.institution || 'SecureCert Institute',
+                course: syncedDbCert?.course || 'Unknown',
+                grade: syncedDbCert?.grade || 'N/A',
+                issueDate: syncedDbCert?.issueDate || new Date(Number(issuedAt) * 1000).toISOString(),
+                txHash: syncedDbCert?.txHash || '0x0',
+                isRevoked,
+                hasDocument: !!syncedDbCert?.documentPath,
+                ipfsCID: metadataCID,
+            });
+        } catch (error) {
+            console.error('Verify error:', error);
+            if (error.message?.includes('Certificate does not exist')) {
+                return res.status(404).json({ exists: false, error: 'Certificate not found on blockchain' });
+            }
+            res.status(500).json({ error: error.message });
+        }
+    }
+);
+
+/** GET /api/certificates/:certId/qrcode — Returns QR code data URL. */
+app.get(
+    '/api/certificates/:certId/qrcode',
+    [param('certId').trim().notEmpty().isLength({ max: 100 })],
+    handleValidationErrors,
+    async (req, res, next) => {
+        try {
+            const { certId } = req.params;
+            const dbCert = await prisma.certificate.findUnique({ where: { certId } });
+            if (!dbCert) return res.status(404).json({ error: 'Certificate not found' });
+
+            const qrCode = await resolveOrPersistQrCode(certId, dbCert);
+            res.json({ qrCode, verifyUrl: `${FRONTEND_URL}/verify/${certId}` });
+        } catch (error) {
+            next(error);
+        }
+    }
+);
+
+/**
+ * GET /api/certificates/:certId/pdf — Streams a generated certificate PDF.
+ * Add ?view=true to render inline.
+ */
+app.get(
+    '/api/certificates/:certId/pdf',
+    [param('certId').trim().notEmpty().isLength({ max: 100 })],
+    handleValidationErrors,
+    async (req, res, next) => {
+        try {
+            const { certId } = req.params;
+
+            let isRevoked = false;
+            try {
+                [, , isRevoked] = await contract.verifyCertificate(certId);
+            } catch (e) {
+                // If blockchain is unreachable, proceed — DB may have the data
+                console.warn(`⚠️ Could not check revocation for ${certId}: ${e.message}`);
+            }
+
+            if (isRevoked) return res.status(400).json({ error: 'Certificate has been revoked' });
+
+            const dbCert = await prisma.certificate.findUnique({ where: { certId } });
+            if (!dbCert) return res.status(404).json({ error: 'Certificate not found' });
+
+            const certData = {
+                certId,
                 studentName: dbCert.studentName,
                 institution: dbCert.institution,
                 course: dbCert.course,
                 grade: dbCert.grade,
+                issueDate: dbCert.issueDate,
                 txHash: dbCert.txHash,
-                ipfsCID: dbCert.ipfsCID,
-                message: 'Verified via local forensic registry (Blockchain node reset)'
-            });
-        }
+            };
 
-        if (!metadataCID) {
-            return res.status(404).json({ exists: false, error: 'Certificate not found on blockchain' });
-        }
+            const qrCode = await resolveOrPersistQrCode(certId, dbCert);
+            const pdfBytes = await generateCertificatePDF(certData, qrCode);
 
-        // Self-healing: sync from IPFS if the record was somehow lost from DB
-        if (!dbCert && metadataCID) {
-            console.log(`🩹 Self-healing: syncing ${certId} from IPFS...`);
-            const ipfsMeta = await fetchFromIPFS(metadataCID);
-            if (ipfsMeta) {
-                dbCert = await prisma.certificate.create({
-                    data: {
-                        certId: ipfsMeta.certId,
-                        studentName: ipfsMeta.studentName,
-                        institution: ipfsMeta.institution,
-                        course: ipfsMeta.course,
-                        grade: ipfsMeta.grade,
-                        issueDate: ipfsMeta.issueDate,
-                        txHash: '0x0000000000000000000000000000000000000000', // placeholder
-                        studentEmail: ipfsMeta.studentEmail,
-                        ipfsCID: metadataCID,
-                    },
-                });
-                console.log(`✅ Self-heal complete for ${certId}`);
+            res.setHeader('Content-Type', 'application/pdf');
+            res.setHeader(
+                'Content-Disposition',
+                req.query.view === 'true'
+                    ? 'inline'
+                    : `attachment; filename="${encodeURIComponent(certId)}_certificate.pdf"`
+            );
+            res.send(Buffer.from(pdfBytes));
+        } catch (error) {
+            if (error.message?.includes('Certificate does not exist')) {
+                return res.status(404).json({ error: 'Certificate not found on blockchain' });
             }
+            next(error);
         }
-
-        const qrCode = await generateQRCode(certId);
-
-        res.json({
-            exists: true,
-            certId: dbCert?.certId || certId,
-            studentName: dbCert?.studentName || 'Unknown',
-            institution: dbCert?.institution || 'SecureCert Institute',
-            course: dbCert?.course || 'Unknown',
-            grade: dbCert?.grade || 'N/A',
-            issueDate: dbCert?.issueDate || new Date(Number(issuedAt) * 1000).toISOString(),
-            txHash: dbCert?.txHash || '0x0',
-            isRevoked,
-            hasDocument: !!dbCert?.documentPath,
-            qrCode,
-            ipfsCID: metadataCID,
-        });
-    } catch (error) {
-        console.error('Verify error:', error);
-        if (error.message.includes('Certificate does not exist')) {
-            return res.status(404).json({ exists: false, error: 'Certificate not found on blockchain' });
-        }
-        res.status(500).json({ error: error.message });
     }
-});
-
-/** GET /api/certificates/:certId/qrcode — Returns QR code data URL for a certificate. */
-app.get('/api/certificates/:certId/qrcode', async (req, res) => {
-    try {
-        const qrCode = await generateQRCode(req.params.certId);
-        res.json({ qrCode, verifyUrl: `${FRONTEND_URL}/verify/${req.params.certId}` });
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-});
-
-/**
- * GET /api/certificates/:certId/pdf
- * Generates and streams a certificate PDF on the fly.
- * Add ?view=true to render inline in the browser instead of downloading.
- */
-app.get('/api/certificates/:certId/pdf', async (req, res) => {
-    try {
-        const { certId } = req.params;
-
-        const [, issuedAt, isRevoked] = await contract.verifyCertificate(certId);
-        if (isRevoked) return res.status(400).json({ error: 'Certificate has been revoked' });
-
-        const dbCert = await prisma.certificate.findUnique({ where: { certId } });
-
-        const certData = {
-            certId,
-            studentName: dbCert?.studentName || 'Unknown',
-            institution: dbCert?.institution || 'SECURECERT VERIFIED',
-            course: dbCert?.course || 'Unknown',
-            grade: dbCert?.grade || 'N/A',
-            issueDate: dbCert?.issueDate || new Date(Number(issuedAt) * 1000),
-            txHash: dbCert?.txHash || '0x0',
-        };
-
-        const qrCode = await generateQRCode(certId);
-        const pdfBytes = await generateCertificatePDF(certData, qrCode);
-
-        res.setHeader('Content-Type', 'application/pdf');
-        res.setHeader(
-            'Content-Disposition',
-            req.query.view === 'true' ? 'inline' : `attachment; filename="${certId}_certificate.pdf"`
-        );
-        res.send(Buffer.from(pdfBytes));
-    } catch (error) {
-        console.error(`❌ PDF generation error for ${req.params.certId}:`, error);
-
-        if (error.message.includes('Certificate does not exist')) return res.status(404).json({ error: 'Certificate not found on blockchain' });
-        if (error.code === 'NETWORK_ERROR' || error.message.includes('network')) return res.status(503).json({ error: 'Blockchain network unreachable' });
-
-        res.status(500).json({
-            error: 'Internal server error during PDF generation',
-            details: process.env.NODE_ENV === 'development' ? error.message : undefined,
-        });
-    }
-});
+);
 
 /**
  * GET /api/certificates/download/:certId
- * Downloads the original document associated with a certificate,
- * stamped with a verification banner, QR code, and watermark.
- * Only PDF files are stamped; images are returned as-is.
- * Add ?view=true to render inline.
+ * Downloads the original document, stamped with a verification banner & QR.
  */
-app.get('/api/certificates/download/:certId', async (req, res) => {
-    try {
-        const { certId } = req.params;
+app.get(
+    '/api/certificates/download/:certId',
+    [param('certId').trim().notEmpty().isLength({ max: 100 })],
+    handleValidationErrors,
+    async (req, res, next) => {
+        try {
+            const { certId } = req.params;
 
-        const [, , isRevoked] = await contract.verifyCertificate(certId);
-        if (isRevoked) return res.status(400).json({ error: 'Certificate has been revoked' });
-
-        const dbCert = await prisma.certificate.findUnique({ where: { certId } });
-        if (!dbCert?.documentPath) return res.status(404).json({ error: 'No document found for this certificate' });
-
-        const filePath = path.join(__dirname, 'uploads', dbCert.documentPath);
-        if (!fs.existsSync(filePath)) return res.status(404).json({ error: 'Document file not found on disk' });
-
-        const ext = path.extname(dbCert.documentPath).toLowerCase();
-
-        if (ext === '.pdf') {
-            // Stamp the existing PDF with a verification banner, QR code, and cert ID watermark
-            const pdfDoc = await PDFDocument.load(fs.readFileSync(filePath));
-            const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
-
-            const qrDataUrl = await generateQRCode(certId);
-            const qrImage = await pdfDoc.embedPng(Buffer.from(qrDataUrl.split(',')[1], 'base64'));
-
-            for (const page of pdfDoc.getPages()) {
-                const { width, height } = page.getSize();
-                const stampText = `VERIFIED: ${certId}`;
-                const fontSize = 12;
-                const textWidth = helveticaBold.widthOfTextAtSize(stampText, fontSize);
-
-                // Dark banner at bottom center
-                page.drawRectangle({ x: width / 2 - textWidth / 2 - 10, y: 20, width: textWidth + 20, height: 25, color: rgb(0.1, 0.3, 0.5) });
-                page.drawText(stampText, { x: width / 2 - textWidth / 2, y: 27, size: fontSize, font: helveticaBold, color: rgb(1, 1, 1) });
-
-                // QR code bottom-right
-                page.drawImage(qrImage, { x: width - 80, y: 15, width: 60, height: 60 });
-
-                // Diagonal watermark
-                page.drawText(certId, { x: width / 4, y: height / 2, size: 40, font: helveticaBold, color: rgb(0.8, 0.8, 0.8), opacity: 0.3, rotate: { type: 'degrees', angle: 45 } });
+            let isRevoked = false;
+            try {
+                [, , isRevoked] = await contract.verifyCertificate(certId);
+            } catch (e) {
+                console.warn(`⚠️ Could not check revocation for ${certId}: ${e.message}`);
             }
 
-            const stampedBytes = await pdfDoc.save();
-            res.setHeader('Content-Type', 'application/pdf');
-            res.setHeader('Content-Disposition', req.query.view === 'true' ? 'inline' : `attachment; filename="stamped_${certId}.pdf"`);
-            return res.send(Buffer.from(stampedBytes));
-        }
+            if (isRevoked) return res.status(400).json({ error: 'Certificate has been revoked' });
 
-        // Non-PDF: return the file directly
-        res.setHeader('Content-Disposition', req.query.view === 'true' ? 'inline' : `attachment; filename="${certId}${ext}"`);
-        res.sendFile(filePath);
-    } catch (error) {
-        if (error.message.includes('Certificate does not exist')) return res.status(404).json({ error: 'Certificate not found on blockchain' });
-        console.error('Download error:', error);
-        res.status(500).json({ error: error.message });
+            const dbCert = await prisma.certificate.findUnique({ where: { certId } });
+            if (!dbCert?.documentPath) return res.status(404).json({ error: 'No document found for this certificate' });
+
+            const filePath = path.join(UPLOADS_DIR, dbCert.documentPath);
+
+            // Guard against path traversal
+            if (!filePath.startsWith(UPLOADS_DIR)) {
+                return res.status(400).json({ error: 'Invalid document path' });
+            }
+
+            try {
+                await fsp.access(filePath);
+            } catch {
+                return res.status(404).json({ error: 'Document file not found on disk' });
+            }
+
+            const ext = path.extname(dbCert.documentPath).toLowerCase();
+
+            if (ext === '.pdf') {
+                const pdfDoc = await PDFDocument.load(await fsp.readFile(filePath));
+                const helveticaBold = await pdfDoc.embedFont(StandardFonts.HelveticaBold);
+                const qrDataUrl = await resolveOrPersistQrCode(certId, dbCert);
+                const qrImage = await pdfDoc.embedPng(Buffer.from(qrDataUrl.split(',')[1], 'base64'));
+
+                for (const page of pdfDoc.getPages()) {
+                    const { width, height } = page.getSize();
+                    const stampText = `VERIFIED: ${certId}`;
+                    const fontSize = 12;
+                    const textWidth = helveticaBold.widthOfTextAtSize(stampText, fontSize);
+
+                    page.drawRectangle({ x: width / 2 - textWidth / 2 - 10, y: 20, width: textWidth + 20, height: 25, color: rgb(0.1, 0.3, 0.5) });
+                    page.drawText(stampText, { x: width / 2 - textWidth / 2, y: 27, size: fontSize, font: helveticaBold, color: rgb(1, 1, 1) });
+                    page.drawImage(qrImage, { x: width - 80, y: 15, width: 60, height: 60 });
+                    page.drawText(certId, { x: width / 4, y: height / 2, size: 40, font: helveticaBold, color: rgb(0.8, 0.8, 0.8), opacity: 0.3, rotate: { type: 'degrees', angle: 45 } });
+                }
+
+                const stampedBytes = await pdfDoc.save();
+                res.setHeader('Content-Type', 'application/pdf');
+                res.setHeader(
+                    'Content-Disposition',
+                    req.query.view === 'true' ? 'inline' : `attachment; filename="${encodeURIComponent(certId)}_stamped.pdf"`
+                );
+                return res.send(Buffer.from(stampedBytes));
+            }
+
+            // Non-PDF: send the file directly
+            res.setHeader(
+                'Content-Disposition',
+                req.query.view === 'true' ? 'inline' : `attachment; filename="${encodeURIComponent(certId)}${ext}"`
+            );
+            res.sendFile(filePath);
+        } catch (error) {
+            if (error.message?.includes('Certificate does not exist')) {
+                return res.status(404).json({ error: 'Certificate not found on blockchain' });
+            }
+            next(error);
+        }
     }
-});
+);
 
 
 // ============================================================
 // SECTION 13: ADMIN PROTECTED ENDPOINTS
-// All routes here require a valid JWT (authenticateToken).
-//
-// GET    /api/admin/certificates              → list all certificates
-// PUT    /api/admin/certificates/:certId      → update notes or document
-// POST   /api/admin/certificates/:certId/revoke → revoke on blockchain
-// DELETE /api/admin/certificates/:certId      → revoke + delete from DB
-// POST   /api/admin/certificates/batch-revoke → bulk revoke
-// POST   /api/admin/certificates/batch-delete → bulk delete from DB
-// POST   /api/admin/certificates/bulk-issue   → CSV batch issuance
-// GET    /api/admin/stats                     → dashboard statistics
 // ============================================================
 
-/** LIST ALL CERTIFICATES — enriches each record with its blockchain status using bulk verification. */
-app.get('/api/admin/certificates', authenticateToken, async (req, res) => {
-    try {
-        const allCerts = await prisma.certificate.findMany({ orderBy: { createdAt: 'desc' } });
-        if (allCerts.length === 0) return res.json([]);
-
-        const certIds = allCerts.map(c => c.certId);
-        
-        // --- Performance Optimization: Batch verify all certificates in 1 RPC call ---
-        let blockchainDataMap = {};
+/**
+ * LIST CERTIFICATES (paginated, searchable)
+ * Enriches page results with batched blockchain verification.
+ */
+app.get(
+    '/api/admin/certificates',
+    authenticateToken,
+    [
+        query('page').optional().isInt({ min: 1 }).toInt(),
+        query('pageSize').optional().isInt({ min: 1, max: 200 }).toInt(),
+        query('search').optional().isLength({ max: 200 }).trim().escape(),
+    ],
+    handleValidationErrors,
+    async (req, res, next) => {
         try {
-            const [metadataCIDs, issuedAts, isRevokedStatuses] = await contract.batchVerifyCertificates(certIds);
-            certIds.forEach((id, index) => {
-                blockchainDataMap[id] = {
-                    metadataCID: metadataCIDs[index],
-                    issuedAt: Number(issuedAts[index]),
-                    isRevoked: isRevokedStatuses[index]
-                };
-            });
-        } catch (err) {
-            console.warn('⚠️ Batch verification failed, falling back to individual checks:', err.message);
-        }
+            const page = req.query.page || 1;
+            const pageSize = req.query.pageSize || 50;
+            const search = req.query.search || '';
 
-        const enriched = allCerts.map(cert => ({
-            ...cert,
-            blockchainData: blockchainDataMap[cert.certId] || null,
-            blockchainError: blockchainDataMap[cert.certId] ? null : 'Blockchain status unavailable'
-        }));
+            const where = search
+                ? {
+                    OR: [
+                        { certId: { contains: search } },
+                        { studentName: { contains: search } },
+                        { institution: { contains: search } },
+                        { course: { contains: search } },
+                        { grade: { contains: search } },
+                    ],
+                }
+                : {};
 
-        res.json(enriched);
-    } catch (error) {
-        console.error('Admin get certificates error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
+            const [total, pageCerts] = await Promise.all([
+                prisma.certificate.count({ where }),
+                prisma.certificate.findMany({
+                    where,
+                    orderBy: { createdAt: 'desc' },
+                    skip: (page - 1) * pageSize,
+                    take: pageSize,
+                }),
+            ]);
 
-/** UPDATE CERTIFICATE — supports updating notes and/or replacing the attached document. */
-app.put('/api/admin/certificates/:certId', authenticateToken, upload.single('document'), async (req, res) => {
-    try {
-        const { certId } = req.params;
-        const dbCert = await prisma.certificate.findUnique({ where: { certId } });
-        if (!dbCert) return res.status(404).json({ error: 'Certificate not found' });
-
-        const updateData = {};
-
-        if (req.body.notes !== undefined) {
-            updateData.notes = req.body.notes;
-        }
-
-        if (req.file) {
-            // Remove old file if one exists
-            if (dbCert.documentPath) {
-                const oldPath = path.join(__dirname, 'uploads', dbCert.documentPath);
-                if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+            let blockchainDataMap = {};
+            if (pageCerts.length > 0) {
+                try {
+                    const certIds = pageCerts.map(c => c.certId);
+                    const [metadataCIDs, issuedAts, isRevokedStatuses] = await batchVerifyCertificatesChunked(certIds);
+                    certIds.forEach((id, idx) => {
+                        blockchainDataMap[id] = {
+                            metadataCID: metadataCIDs[idx],
+                            issuedAt: Number(issuedAts[idx]),
+                            isRevoked: isRevokedStatuses[idx],
+                        };
+                    });
+                } catch (err) {
+                    console.warn('⚠️ Batch verification failed:', err.message);
+                }
             }
 
-            const ext = path.extname(req.file.originalname);
-            const newFilename = `${certId}${ext}`;
-            fs.renameSync(req.file.path, path.join(__dirname, 'uploads', newFilename));
+            const items = pageCerts.map(cert => ({
+                ...cert,
+                blockchainData: blockchainDataMap[cert.certId] || null,
+                blockchainError: blockchainDataMap[cert.certId] ? null : 'Blockchain status unavailable',
+            }));
 
-            updateData.documentPath = newFilename;
-            updateData.documentOriginalName = req.file.originalname;
+            res.json({ items, total, page, pageSize });
+        } catch (error) {
+            next(error);
         }
-
-        if (Object.keys(updateData).length > 0) {
-            await prisma.certificate.update({ where: { certId }, data: updateData });
-        }
-
-        const updated = await prisma.certificate.findUnique({ where: { certId } });
-        res.json({ success: true, message: 'Certificate updated successfully', certificate: updated });
-    } catch (error) {
-        console.error('Update certificate error:', error);
-        res.status(500).json({ error: error.message });
     }
-});
+);
 
-/** REVOKE CERTIFICATE — sends a revoke transaction to the blockchain. */
-app.post('/api/admin/certificates/:certId/revoke', authenticateToken, async (req, res) => {
-    try {
-        const { certId } = req.params;
-
-        const [, , isRevoked] = await contract.verifyCertificate(certId);
-        if (isRevoked) return res.status(400).json({ error: 'Certificate is already revoked' });
-
-        const tx = await contract.revokeCertificate(certId);
-        await tx.wait();
-
-        res.json({ success: true, message: 'Certificate revoked successfully', txHash: tx.hash });
-    } catch (error) {
-        if (error.message.includes('Certificate does not exist')) return res.status(404).json({ error: 'Certificate not found on blockchain' });
-        console.error('Revoke error:', error);
-        res.status(500).json({ error: error.message });
-    }
-});
-
-/**
- * DELETE CERTIFICATE — revokes on blockchain (if not already revoked),
- * removes the associated file, and deletes the DB record.
- */
-app.delete('/api/admin/certificates/:certId', authenticateToken, async (req, res) => {
-    try {
-        const { certId } = req.params;
-        const dbCert = await prisma.certificate.findUnique({ where: { certId } });
-        if (!dbCert) return res.status(404).json({ error: 'Certificate not found' });
-
-        // Auto-revoke on blockchain before deletion
+/** UPDATE CERTIFICATE — update notes or replace attached document. */
+app.put(
+    '/api/admin/certificates/:certId',
+    authenticateToken,
+    upload.single('document'),
+    [param('certId').trim().notEmpty().isLength({ max: 100 })],
+    handleValidationErrors,
+    async (req, res, next) => {
+        let tempFilePath = req.file?.path || null;
         try {
+            const { certId } = req.params;
+            const dbCert = await prisma.certificate.findUnique({ where: { certId } });
+            if (!dbCert) return res.status(404).json({ error: 'Certificate not found' });
+
+            if (req.file) {
+                const isValid = await validateFileMagicBytes(req.file.path, req.file.mimetype);
+                if (!isValid) {
+                    await safeUnlink(req.file.path);
+                    return res.status(400).json({ error: 'Uploaded file contents do not match the declared file type.' });
+                }
+            }
+
+            const updateData = {};
+            if (req.body.notes !== undefined) updateData.notes = req.body.notes;
+
+            if (req.file) {
+                if (dbCert.documentPath) {
+                    await safeUnlink(path.join(UPLOADS_DIR, dbCert.documentPath));
+                }
+                const ext = path.extname(req.file.originalname).toLowerCase();
+                const newFilename = `${certId}${ext}`;
+                await fsp.rename(req.file.path, path.join(UPLOADS_DIR, newFilename));
+                tempFilePath = null;
+                updateData.documentPath = newFilename;
+                updateData.documentOriginalName = req.file.originalname;
+
+                // Invalidate cached PDF since document has changed
+                await safeUnlink(path.join(CACHE_DIR, `${certId}_cert.pdf`));
+            }
+
+            if (Object.keys(updateData).length > 0) {
+                await prisma.certificate.update({ where: { certId }, data: updateData });
+            }
+
+            const updated = await prisma.certificate.findUnique({ where: { certId } });
+            res.json({ success: true, message: 'Certificate updated successfully', certificate: updated });
+        } catch (error) {
+            if (tempFilePath) await safeUnlink(tempFilePath);
+            next(error);
+        }
+    }
+);
+
+/** REVOKE CERTIFICATE — sends revoke TX to blockchain. */
+app.post(
+    '/api/admin/certificates/:certId/revoke',
+    authenticateToken,
+    [param('certId').trim().notEmpty().isLength({ max: 100 })],
+    handleValidationErrors,
+    async (req, res, next) => {
+        try {
+            const { certId } = req.params;
             const [, , isRevoked] = await contract.verifyCertificate(certId);
-            if (!isRevoked) {
-                console.log(`⚠️ Auto-revoking ${certId} before deletion...`);
-                const tx = await contract.revokeCertificate(certId);
-                await tx.wait();
-                console.log(`✅ ${certId} revoked on blockchain.`);
+            if (isRevoked) return res.status(400).json({ error: 'Certificate is already revoked' });
+
+            const tx = await contract.revokeCertificate(certId);
+            await tx.wait();
+
+            res.json({ success: true, message: 'Certificate revoked successfully', txHash: tx.hash });
+        } catch (error) {
+            if (error.message?.includes('Certificate does not exist')) {
+                return res.status(404).json({ error: 'Certificate not found on blockchain' });
             }
-        } catch (blockchainError) {
-            if (!blockchainError.message.includes('Certificate does not exist')) {
-                console.error('Blockchain revocation failed during delete:', blockchainError);
-            }
+            next(error);
         }
-
-        // Remove physical document file
-        if (dbCert.documentPath) {
-            const filePath = path.join(__dirname, 'uploads', dbCert.documentPath);
-            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-        }
-
-        await prisma.certificate.delete({ where: { certId } });
-
-        res.json({ success: true, message: 'Certificate revoked on blockchain and deleted from database.' });
-    } catch (error) {
-        console.error('Delete certificate error:', error);
-        res.status(500).json({ error: error.message });
     }
-});
+);
 
 /**
- * BATCH REVOKE — revokes multiple certificates on the blockchain one by one.
- * (Contract does not expose a batch revoke function.)
- * Body: { certIds: string[] }
+ * DELETE CERTIFICATE — revokes on-chain, removes file, deletes DB record.
  */
-app.post('/api/admin/certificates/batch-revoke', authenticateToken, async (req, res) => {
-    try {
-        const { certIds } = req.body;
-        if (!Array.isArray(certIds) || certIds.length === 0) {
-            return res.status(400).json({ error: 'Array of certificate IDs is required' });
+app.delete(
+    '/api/admin/certificates/:certId',
+    authenticateToken,
+    [param('certId').trim().notEmpty().isLength({ max: 100 })],
+    handleValidationErrors,
+    async (req, res, next) => {
+        try {
+            const { certId } = req.params;
+            const dbCert = await prisma.certificate.findUnique({ where: { certId } });
+            if (!dbCert) return res.status(404).json({ error: 'Certificate not found' });
+
+            try {
+                const [, , isRevoked] = await contract.verifyCertificate(certId);
+                if (!isRevoked) {
+                    console.log(`⚠️ Auto-revoking ${certId} before deletion...`);
+                    const tx = await contract.revokeCertificate(certId);
+                    await tx.wait();
+                    console.log(`✅ ${certId} revoked on blockchain.`);
+                }
+            } catch (blockchainError) {
+                if (!blockchainError.message?.includes('Certificate does not exist')) {
+                    console.error('Blockchain revocation failed during delete:', blockchainError.message);
+                }
+            }
+
+            if (dbCert.documentPath) await safeUnlink(path.join(UPLOADS_DIR, dbCert.documentPath));
+            await safeUnlink(path.join(CACHE_DIR, `${certId}_cert.pdf`));
+
+            await prisma.certificate.delete({ where: { certId } });
+
+            res.json({ success: true, message: 'Certificate revoked and deleted successfully.' });
+        } catch (error) {
+            next(error);
         }
-
-        console.log(`🔄 Batch revoking ${certIds.length} certificates...`);
-
-        const results = await Promise.allSettled(
-            certIds.map(async (certId) => {
-                const tx = await contract.revokeCertificate(certId);
-                await tx.wait();
-                return { certId, success: true, txHash: tx.hash };
-            })
-        );
-
-        const formatted = results.map((r, i) =>
-            r.status === 'fulfilled'
-                ? r.value
-                : { certId: certIds[i], success: false, error: r.reason?.message }
-        );
-
-        const succeeded = formatted.filter(r => r.success).length;
-        res.json({
-            message: `Batch processing complete. ${succeeded} revoked, ${certIds.length - succeeded} failed.`,
-            results: formatted,
-        });
-    } catch (error) {
-        console.error('Batch revoke error:', error);
-        res.status(500).json({ error: error.message });
     }
-});
+);
 
 /**
- * BATCH DELETE — removes multiple certificates from the database
- * and deletes their associated physical files.
- * Does NOT revoke on blockchain; use batch-revoke first if needed.
+ * BATCH REVOKE — revokes multiple certificates on-chain one by one.
  * Body: { certIds: string[] }
  */
-app.post('/api/admin/certificates/batch-delete', authenticateToken, async (req, res) => {
-    try {
-        const { certIds } = req.body;
-        if (!Array.isArray(certIds) || certIds.length === 0) {
-            return res.status(400).json({ error: 'Array of certificate IDs is required' });
+app.post(
+    '/api/admin/certificates/batch-revoke',
+    authenticateToken,
+    [body('certIds').isArray({ min: 1, max: 500 }).withMessage('certIds must be a non-empty array (max 500)')],
+    handleValidationErrors,
+    async (req, res, next) => {
+        try {
+            const { certIds } = req.body;
+            console.log(`🔄 Batch revoking ${certIds.length} certificates...`);
+
+            const results = await asyncPool(3, certIds, async (certId) => {
+                try {
+                    const tx = await contract.revokeCertificate(certId);
+                    await tx.wait();
+                    return { certId, success: true, txHash: tx.hash };
+                } catch (reason) {
+                    return { certId, success: false, error: reason?.message };
+                }
+            });
+
+            const succeeded = results.filter(r => r.success).length;
+            res.json({
+                message: `Batch complete: ${succeeded} revoked, ${certIds.length - succeeded} failed.`,
+                results,
+            });
+        } catch (error) {
+            next(error);
         }
-
-        const certsToDelete = await prisma.certificate.findMany({ where: { certId: { in: certIds } } });
-
-        // Delete physical document files
-        for (const cert of certsToDelete) {
-            if (cert.documentPath) {
-                const filePath = path.join(__dirname, 'uploads', cert.documentPath);
-                if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
-            }
-        }
-
-        const deleteResult = await prisma.certificate.deleteMany({ where: { certId: { in: certIds } } });
-
-        res.json({
-            message: `Successfully deleted ${deleteResult.count} certificates from database.`,
-            count: deleteResult.count,
-        });
-    } catch (error) {
-        console.error('Batch delete error:', error);
-        res.status(500).json({ error: error.message });
     }
-});
+);
+
+/**
+ * BATCH DELETE — removes records from DB and their files.
+ * Body: { certIds: string[] }
+ */
+app.post(
+    '/api/admin/certificates/batch-delete',
+    authenticateToken,
+    [body('certIds').isArray({ min: 1, max: 500 }).withMessage('certIds must be a non-empty array (max 500)')],
+    handleValidationErrors,
+    async (req, res, next) => {
+        try {
+            const { certIds } = req.body;
+            const certsToDelete = await prisma.certificate.findMany({ where: { certId: { in: certIds } } });
+
+            await Promise.allSettled(
+                certsToDelete.flatMap(cert => [
+                    cert.documentPath ? safeUnlink(path.join(UPLOADS_DIR, cert.documentPath)) : Promise.resolve(),
+                    safeUnlink(path.join(CACHE_DIR, `${cert.certId}_cert.pdf`)),
+                ])
+            );
+
+            const deleteResult = await prisma.certificate.deleteMany({ where: { certId: { in: certIds } } });
+
+            res.json({
+                message: `Successfully deleted ${deleteResult.count} certificates from database.`,
+                count: deleteResult.count,
+            });
+        } catch (error) {
+            next(error);
+        }
+    }
+);
 
 /**
  * BULK ISSUE VIA CSV
  * Accepts a CSV file with columns: studentName, course, grade, email (optional).
- * Processes in batches of 20 to stay within block gas limits.
- * Responds immediately with 202 Accepted; processing happens asynchronously.
+ * Processes asynchronously in batches of 20 and responds with 202 immediately.
  *
- * CSV format expected:
+ * Expected CSV:
  *   studentName,course,grade,email
- *   John Doe,Computer Science,A,john@example.com
+ *   Jane Doe,Computer Science,First Class,jane@example.com
  */
-app.post('/api/admin/certificates/bulk-issue', authenticateToken, uploadMemory.single('csvFile'), async (req, res) => {
-    try {
-        if (!req.file) return res.status(400).json({ error: 'CSV file is required' });
+app.post(
+    '/api/admin/certificates/bulk-issue',
+    authenticateToken,
+    uploadMemory.single('csvFile'),
+    [body('institution').optional().trim().isLength({ max: 150 })],
+    handleValidationErrors,
+    async (req, res) => {
+        try {
+            if (!req.file) return res.status(400).json({ error: 'CSV file is required' });
 
-        const institution = req.body.institution || 'SecureCert Institute';
-        const rows = [];
+            const institution = req.body.institution?.trim() || 'SecureCert Institute';
+            const rows = [];
 
-        // Parse CSV rows from in-memory buffer
-        const { Readable } = require('stream');
-        Readable.from(req.file.buffer)
-            .pipe(csv())
-            .on('data', (row) => {
-                if (row.studentName && row.course && row.grade) {
-                    rows.push({
-                        studentName: row.studentName.trim(),
-                        course: row.course.trim(),
-                        grade: row.grade.trim(),
-                        email: row.email ? row.email.trim() : null,
-                    });
-                }
-            })
-            .on('end', async () => {
-                if (rows.length === 0) {
-                    if (!res.headersSent) res.status(400).json({ error: 'No valid rows found in CSV' });
-                    return;
-                }
+            const { Readable } = require('stream');
+            const parser = Readable.from(req.file.buffer).pipe(csv());
 
-                // Acknowledge immediately — bulk processing can take a long time
-                res.status(202).json({ message: `Processing ${rows.length} certificates in the background...` });
+            await new Promise((resolve, reject) => {
+                parser
+                    .on('data', (row) => {
+                        const studentName = row.studentName?.trim();
+                        const course = row.course?.trim();
+                        const grade = row.grade?.trim();
 
+                        // Validate required fields and reasonable length limits
+                        if (
+                            studentName && studentName.length <= 100 &&
+                            course && course.length <= 100 &&
+                            grade && grade.length <= 50
+                        ) {
+                            rows.push({
+                                studentName,
+                                course,
+                                grade,
+                                email: row.email ? row.email.trim() : null,
+                            });
+                        }
+                    })
+                    .on('end', resolve)
+                    .on('error', reject);
+            });
+
+            if (rows.length === 0) {
+                return res.status(400).json({ error: 'No valid rows found in CSV' });
+            }
+
+            // Limit to prevent runaway jobs
+            const MAX_BULK = 1000;
+            if (rows.length > MAX_BULK) {
+                return res.status(400).json({ error: `CSV exceeds the maximum of ${MAX_BULK} rows per bulk import.` });
+            }
+
+            res.status(202).json({ message: `Processing ${rows.length} certificates in the background.` });
+
+            // Async processing after response is sent
+            (async () => {
                 const BATCH_SIZE = 20;
                 let processed = 0;
 
                 for (let i = 0; i < rows.length; i += BATCH_SIZE) {
                     const batch = rows.slice(i, i + BATCH_SIZE);
-                    const batchIds = [];
-                    const batchCIDs = [];
                     const timestamp = Date.now();
 
-                    // --- Performance Optimization: Parallel IPFS pinning ---
-                    const pinPromises = batch.map((student, j) => {
-                        const certId = `CERT${timestamp}${i + j}`;
+                    const pinTasks = batch.map((student, j) => ({
+                        student,
+                        j,
+                        certId: `CERT${timestamp}${i + j}`,
+                    }));
+
+                    const pinResults = await asyncPool(4, pinTasks, async ({ student, certId }) => {
                         const metadata = {
                             certId, studentName: student.studentName, institution,
                             course: student.course, grade: student.grade,
                             issueDate: new Date().toISOString(), studentEmail: student.email,
                         };
-                        return pinJSONToIPFS(metadata, certId).then(cid => ({ certId, cid }));
+                        const cid = await pinJSONToIPFS(metadata, certId);
+                        return cid ? { certId, cid, student } : null;
                     });
 
-                    const pinResults = await Promise.all(pinPromises);
-                    pinResults.forEach(res => {
-                        if (res.cid) {
-                            batchIds.push(res.certId);
-                            batchCIDs.push(res.cid);
-                        }
-                    });
+                    const valid = pinResults.filter(Boolean);
+                    if (valid.length === 0) {
+                        console.warn(`⚠️ Batch ${Math.floor(i / BATCH_SIZE) + 1}: no successful IPFS pins, skipping`);
+                        continue;
+                    }
 
                     try {
                         const feePerCert = await contract.issuanceFee();
-                        const totalFee = feePerCert * BigInt(batchIds.length);
-
-                        console.log(`🔄 Minting batch ${Math.floor(i / BATCH_SIZE) + 1} (${batchIds.length} certs) — fee: ${ethers.formatEther(totalFee)} ETH`);
-                        const tx = await contract.batchIssueCertificates(batchIds, batchCIDs, { value: totalFee });
+                        const totalFee = feePerCert * BigInt(valid.length);
+                        const tx = await contract.batchIssueCertificates(
+                            valid.map(r => r.certId),
+                            valid.map(r => r.cid),
+                            { value: totalFee }
+                        );
                         await tx.wait();
 
-                        // --- Performance Optimization: Parallel Post-Issuance Processing ---
-                        const postProcessPromises = batch.map(async (student, j) => {
-                            const certId = batchIds[j];
-                            if (!certId) return;
-
+                        await asyncPool(3, valid, async ({ certId, student }) => {
                             try {
                                 const qrCode = await generateQRCode(certId);
                                 const certData = { certId, studentName: student.studentName, institution, course: student.course, grade: student.grade, issueDate: new Date(), txHash: tx.hash };
@@ -1448,69 +1686,86 @@ app.post('/api/admin/certificates/bulk-issue', authenticateToken, uploadMemory.s
                                         txHash: tx.hash,
                                         studentEmail: student.email,
                                         ipfsCID,
+                                        qrCode,
                                     },
                                 });
                                 processed++;
                             } catch (itemErr) {
-                                console.error(`❌ Error processing certificate ${certId}:`, itemErr.message);
+                                console.error(`❌ Error processing ${certId}:`, itemErr.message);
                             }
                         });
-
-                        await Promise.all(postProcessPromises);
                     } catch (batchErr) {
                         console.error(`❌ Batch ${Math.floor(i / BATCH_SIZE) + 1} blockchain error:`, batchErr.message);
                     }
                 }
 
                 console.log(`✅ Bulk issuance complete: ${processed}/${rows.length} certificates minted`);
-            })
-            .on('error', (err) => {
-                console.error('CSV parse error:', err);
-            });
-
-    } catch (error) {
-        console.error('Bulk issue error:', error);
-        if (!res.headersSent) res.status(500).json({ error: error.message });
+            })();
+        } catch (error) {
+            console.error('Bulk issue error:', error);
+            if (!res.headersSent) res.status(500).json({ error: error.message });
+        }
     }
-});
+);
 
 /**
  * ADMIN STATS
- * Returns aggregate counts: total, valid, revoked, and documents uploaded.
- * Uses batch verification for high-performance statistics generation.
+ * Returns totals: all, valid, revoked, with uploaded documents.
+ * Also returns grade and course breakdowns for charts.
  */
-app.get('/api/admin/stats', authenticateToken, async (req, res) => {
+app.get('/api/admin/stats', authenticateToken, async (req, res, next) => {
     try {
-        const allCerts = await prisma.certificate.findMany();
-        if (allCerts.length === 0) {
-            return res.json({ totalCertificates: 0, validCertificates: 0, revokedCertificates: 0, documentsUploaded: 0 });
+        const [totalCertificates, documentsUploaded] = await Promise.all([
+            prisma.certificate.count(),
+            prisma.certificate.count({ where: { documentPath: { not: null } } }),
+        ]);
+
+        if (totalCertificates === 0) {
+            return res.json({
+                totalCertificates: 0,
+                validCertificates: 0,
+                revokedCertificates: 0,
+                documentsUploaded: 0,
+                chartGrades: [],
+                chartCourses: [],
+            });
         }
 
-        const certIds = allCerts.map(c => c.certId);
-        let validCount = 0;
+        let validCount = totalCertificates;
         let revokedCount = 0;
 
-        // --- Performance Optimization: Use batch verification for statistics ---
+        const idRows = await prisma.certificate.findMany({ select: { certId: true } });
+        const certIds = idRows.map(r => r.certId);
+
         try {
-            const [, , isRevokedStatuses] = await contract.batchVerifyCertificates(certIds);
-            isRevokedStatuses.forEach(revoked => {
-                revoked ? revokedCount++ : validCount++;
-            });
+            const [, , isRevokedStatuses] = await batchVerifyCertificatesChunked(certIds);
+            revokedCount = isRevokedStatuses.filter(Boolean).length;
+            validCount = totalCertificates - revokedCount;
         } catch (err) {
             console.error('Batch stats verification failed:', err.message);
-            // Fallback: assume all are valid if blockchain is unreachable (dev mode only ideally)
-            validCount = allCerts.length;
+        }
+
+        const [gradeGroups, courseGroups] = await Promise.all([
+            prisma.certificate.groupBy({ by: ['grade'], _count: { grade: true } }),
+            prisma.certificate.groupBy({ by: ['course'], _count: { course: true }, orderBy: { _count: { course: 'desc' } }, take: 5 }),
+        ]);
+
+        const gradeBucket = new Map();
+        for (const row of gradeGroups) {
+            const label = chartGradeLabel(row.grade);
+            gradeBucket.set(label, (gradeBucket.get(label) || 0) + row._count.grade);
         }
 
         res.json({
-            totalCertificates: allCerts.length,
+            totalCertificates,
             validCertificates: validCount,
             revokedCertificates: revokedCount,
-            documentsUploaded: allCerts.filter(c => c.documentPath).length,
+            documentsUploaded,
+            chartGrades: [...gradeBucket.entries()].map(([name, value]) => ({ name, value })),
+            chartCourses: courseGroups.map(r => ({ name: r.course, value: r._count.course })),
         });
     } catch (error) {
-        console.error('Stats error:', error);
-        res.status(500).json({ error: error.message });
+        next(error);
     }
 });
 
@@ -1519,16 +1774,19 @@ app.get('/api/admin/stats', authenticateToken, async (req, res) => {
 // SECTION 14: LEGACY & MISC ENDPOINTS
 // ============================================================
 
-/** Legacy public certificates list — returns all DB records unfiltered. */
-app.get('/api/certificates', async (_req, res) => {
-    const certs = await prisma.certificate.findMany({ orderBy: { createdAt: 'desc' } });
-    res.json(certs);
+/** Legacy public certificates list — all DB records, unfiltered. */
+app.get('/api/certificates', async (_req, res, next) => {
+    try {
+        const certs = await prisma.certificate.findMany({ orderBy: { createdAt: 'desc' } });
+        res.json(certs);
+    } catch (error) {
+        next(error);
+    }
 });
 
 
 // ============================================================
 // SECTION 15: ERROR HANDLER & SERVER STARTUP
-// The error handler must be registered after all routes.
 // ============================================================
 
 app.use(errorHandler);
@@ -1543,11 +1801,10 @@ const server = app.listen(PORT, () => {
     console.log(`🌐 Frontend:   ${FRONTEND_URL}`);
     console.log(`⛓️  RPC:        ${process.env.RPC_URL}`);
     console.log(`📜 Contract:   ${process.env.CONTRACT_ADDRESS}`);
-    console.log(`💾 Database:   Connected (Prisma + SQLite)`);
+    console.log(`💾 Database:   Connected (Prisma + SQLite, WAL mode)`);
     console.log('='.repeat(50) + '\n');
 });
 
-// Graceful shutdown: close DB and server cleanly on SIGTERM/SIGINT
 const shutdown = async (signal) => {
     console.log(`\n${signal} received. Shutting down gracefully...`);
     await prisma.$disconnect();
@@ -1559,3 +1816,8 @@ const shutdown = async (signal) => {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+
+// Catch unhandled promise rejections to prevent silent failures
+process.on('unhandledRejection', (reason) => {
+    console.error('🔥 Unhandled Promise Rejection:', reason);
+});

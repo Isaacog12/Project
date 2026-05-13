@@ -22,6 +22,7 @@ model Certificate {
   documentOriginalName String?
   studentEmail         String?
   ipfsCID              String?
+  qrCode               String?
   notes                String?
   createdAt            DateTime @default(now())
 

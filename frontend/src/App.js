@@ -123,11 +123,14 @@ function LegalModal({ title, content, onClose }) {
 function SearchableDropdown({ options, value, onChange, placeholder, icon = "🏛️" }) {
     const [isOpen, setIsOpen] = useState(false);
     const [searchTerm, setSearchTerm] = useState("");
+    const debouncedOptionSearch = useDebounce(searchTerm, 200);
     const dropdownRef = React.useRef(null);
 
-    const filteredOptions = options.filter(opt =>
-        opt.toLowerCase().includes(searchTerm.toLowerCase())
-    );
+    const filteredOptions = React.useMemo(() => {
+        const q = debouncedOptionSearch.toLowerCase();
+        if (!q) return options;
+        return options.filter(opt => opt.toLowerCase().includes(q));
+    }, [options, debouncedOptionSearch]);
 
     useEffect(() => {
         const handleClickOutside = (event) => {
@@ -256,7 +259,16 @@ function PublicVerifyPage() {
         const verifyOnLoad = async () => {
             try {
                 const response = await axios.get(`${API_URL}/certificates/verify/${certId}`);
-                setResult(response.data);
+                const data = { ...response.data };
+                if (data.exists && !data.isRevoked && !data.qrCode) {
+                    try {
+                        const qrRes = await axios.get(`${API_URL}/certificates/${certId}/qrcode`);
+                        data.qrCode = qrRes.data.qrCode;
+                    } catch {
+                        /* QR is optional for display */
+                    }
+                }
+                setResult(data);
             } catch (error) {
                 setResult({ error: error.response?.data?.error || error.message });
             } finally {
@@ -877,7 +889,16 @@ function VerifyForm() {
 
         try {
             const response = await axios.get(`${API_URL}/certificates/verify/${certId}`);
-            setVerifyResult(response.data);
+            const data = { ...response.data };
+            if (data.exists && !data.isRevoked && !data.qrCode) {
+                try {
+                    const qrRes = await axios.get(`${API_URL}/certificates/${certId}/qrcode`);
+                    data.qrCode = qrRes.data.qrCode;
+                } catch {
+                    /* optional */
+                }
+            }
+            setVerifyResult(data);
         } catch (error) {
             setVerifyResult({ error: error.response?.data?.error || error.message });
         } finally {
@@ -1042,6 +1063,9 @@ function AdminDashboard({ walletState, isAuthorized }) {
     const [isAdmin, setIsAdmin] = useState(false);
     const [adminToken, setAdminToken] = useState(localStorage.getItem('adminToken'));
     const [certificates, setCertificates] = useState([]);
+    const [totalCount, setTotalCount] = useState(0);
+    const [page, setPage] = useState(1);
+    const pageSize = 50;
     const [adminLoading, setAdminLoading] = useState(false);
     const [stats, setStats] = useState(null);
     const [actionLoading, setActionLoading] = useState({});
@@ -1051,74 +1075,67 @@ function AdminDashboard({ walletState, isAuthorized }) {
     const [batchLoading, setBatchLoading] = useState(false);
     const navigate = useNavigate();
 
-    // Derived Analytics from `certificates` array
     const COLORS = ['#8b5cf6', '#a78bfa', '#c4b5fd', '#ede9fe', '#fbbf24', '#fcd34d', '#fde68a'];
 
-    const gradeData = React.useMemo(() => {
-        const counts = {};
-        certificates.forEach(c => {
-            let label = c.grade;
-            if (c.grade.includes('First Class')) label = 'First Class';
-            else if (c.grade.includes('Upper')) label = 'Second Class Upper';
-            else if (c.grade.includes('Lower')) label = 'Second Class Lower';
-            else if (c.grade.includes('Third')) label = 'Third Class';
-            else if (c.grade.includes('Pass')) label = 'Pass';
+    const gradeData = stats?.chartGrades?.length ? stats.chartGrades : [];
+    const courseData = stats?.chartCourses?.length ? stats.chartCourses : [];
 
-            counts[label] = (counts[label] || 0) + 1;
-        });
-        return Object.entries(counts).map(([name, value]) => ({ name, value }));
-    }, [certificates]);
-
-    const courseData = React.useMemo(() => {
-        const counts = {};
-        certificates.forEach(c => {
-            counts[c.course] = (counts[c.course] || 0) + 1;
-        });
-        return Object.entries(counts)
-            .map(([name, value]) => ({ name, value }))
-            .sort((a, b) => b.value - a.value)
-            .slice(0, 5);
-    }, [certificates]);
-
-    // Selection helpers
-    const toggleSelect = (certId) => {
+    const toggleSelect = React.useCallback((id) => {
         setSelectedCerts(prev => {
             const next = new Set(prev);
-            if (next.has(certId)) next.delete(certId);
-            else next.add(certId);
+            if (next.has(id)) next.delete(id);
+            else next.add(id);
             return next;
         });
-    };
+    }, []);
 
     const toggleSelectAll = () => {
-        if (selectedCerts.size === filteredCertificates.length) {
+        if (selectedCerts.size === certificates.length && certificates.length > 0) {
             setSelectedCerts(new Set());
         } else {
-            setSelectedCerts(new Set(filteredCertificates.map(c => c.certId)));
+            setSelectedCerts(new Set(certificates.map(c => c.certId)));
         }
     };
 
     const clearSelection = () => setSelectedCerts(new Set());
 
-    const loadAdminData = React.useCallback(async (token = adminToken) => {
+    const loadStats = React.useCallback(async (token = adminToken) => {
+        const statsResponse = await axios.get(`${API_URL}/admin/stats`, {
+            headers: { Authorization: `Bearer ${token}` }
+        });
+        setStats(statsResponse.data);
+    }, [adminToken]);
+
+    const loadCertificatesPage = React.useCallback(async (token, pageNum, searchStr) => {
         setAdminLoading(true);
         try {
-            const [certsResponse, statsResponse] = await Promise.all([
-                axios.get(`${API_URL}/admin/certificates`, {
-                    headers: { Authorization: `Bearer ${token}` }
-                }),
-                axios.get(`${API_URL}/admin/stats`, {
-                    headers: { Authorization: `Bearer ${token}` }
-                })
-            ]);
-            setCertificates(certsResponse.data);
-            setStats(statsResponse.data);
+            const params = { page: pageNum, pageSize };
+            if (searchStr && searchStr.trim()) params.search = searchStr.trim();
+            const certsResponse = await axios.get(`${API_URL}/admin/certificates`, {
+                headers: { Authorization: `Bearer ${token}` },
+                params,
+            });
+            const payload = certsResponse.data;
+            if (Array.isArray(payload)) {
+                setCertificates(payload);
+                setTotalCount(payload.length);
+            } else {
+                setCertificates(payload.items || []);
+                setTotalCount(typeof payload.total === 'number' ? payload.total : (payload.items || []).length);
+            }
         } catch (error) {
-            console.error('Failed to load admin data:', error);
+            console.error('Failed to load certificates:', error);
         } finally {
             setAdminLoading(false);
         }
-    }, [adminToken]);
+    }, [pageSize]);
+
+    const loadAdminData = React.useCallback(async (token = adminToken) => {
+        await Promise.all([
+            loadStats(token),
+            loadCertificatesPage(token, page, debouncedSearchQuery),
+        ]);
+    }, [adminToken, page, debouncedSearchQuery, loadStats, loadCertificatesPage]);
 
     const verifyToken = React.useCallback(async () => {
         try {
@@ -1126,20 +1143,28 @@ function AdminDashboard({ walletState, isAuthorized }) {
                 headers: { Authorization: `Bearer ${adminToken}` }
             });
             setIsAdmin(true);
-            loadAdminData(adminToken);
         } catch (error) {
             localStorage.removeItem('adminToken');
             setAdminToken(null);
             setIsAdmin(false);
             navigate('/login');
         }
-    }, [adminToken, loadAdminData, navigate]);
+    }, [adminToken, navigate]);
 
     useEffect(() => {
         if (adminToken) {
             verifyToken();
         }
     }, [adminToken, verifyToken]);
+
+    useEffect(() => {
+        if (!isAdmin || !adminToken) return;
+        loadAdminData(adminToken);
+    }, [isAdmin, adminToken, page, debouncedSearchQuery, loadAdminData]);
+
+    useEffect(() => {
+        setPage(1);
+    }, [debouncedSearchQuery]);
 
     useEffect(() => {
         if (!isAdmin && !localStorage.getItem('adminToken')) {
@@ -1152,6 +1177,7 @@ function AdminDashboard({ walletState, isAuthorized }) {
         setAdminToken(null);
         setIsAdmin(false);
         setCertificates([]);
+        setTotalCount(0);
         setStats(null);
         navigate('/login');
     };
@@ -1234,33 +1260,13 @@ function AdminDashboard({ walletState, isAuthorized }) {
         }
     };
 
-    const goToPublicVerify = (id) => {
+    const goToPublicVerify = React.useCallback((id) => {
         navigate(`/verify/${id}`);
-    };
-
-    // Filter certificates based on search query - MEMOIZED and DEBOUNCED
-    const filteredCertificates = React.useMemo(() => {
-        if (!debouncedSearchQuery) return certificates;
-
-        const query = debouncedSearchQuery.toLowerCase();
-        return certificates.filter(cert => {
-            const studentName = (cert.blockchainData?.studentName || cert.studentName || '').toLowerCase();
-            const course = (cert.blockchainData?.course || cert.course || '').toLowerCase();
-            const grade = (cert.blockchainData?.grade || cert.grade || '').toLowerCase();
-            const institution = (cert.institution || '').toLowerCase();
-            const certIdString = (cert.certId || '').toLowerCase();
-
-            return studentName.includes(query) ||
-                course.includes(query) ||
-                grade.includes(query) ||
-                institution.includes(query) ||
-                certIdString.includes(query);
-        });
-    }, [certificates, debouncedSearchQuery]);
+    }, [navigate]);
 
     const memoizedRowProps = React.useMemo(() => ({}), []);
     const rowRenderer = React.useCallback(({ index, style }) => {
-        const cert = filteredCertificates[index];
+        const cert = certificates[index];
         if (!cert) return null;
         return (
             <div style={style} className={`table-row ${cert.blockchainData?.isRevoked ? 'revoked-row' : ''} ${selectedCerts.has(cert.certId) ? 'selected-row' : ''}`}>
@@ -1295,7 +1301,7 @@ function AdminDashboard({ walletState, isAuthorized }) {
                 </div>
             </div>
         );
-    }, [filteredCertificates, selectedCerts, actionLoading, handleRevoke, handleDelete, goToPublicVerify, toggleSelect]);
+    }, [certificates, selectedCerts, actionLoading, handleRevoke, handleDelete, goToPublicVerify, toggleSelect]);
 
     if (!isAdmin) {
         return (
@@ -1336,7 +1342,7 @@ function AdminDashboard({ walletState, isAuthorized }) {
                 </div>
             )}
 
-            {certificates.length > 0 && (
+            {stats && stats.totalCertificates > 0 && (gradeData.length > 0 || courseData.length > 0) && (
                 <div className="dashboard-charts-grid">
                     <div className="chart-container">
                         <h3 className="chart-title">📊 Grade Distribution</h3>
@@ -1416,7 +1422,7 @@ function AdminDashboard({ walletState, isAuthorized }) {
                 </div>
                 {searchQuery && (
                     <p className="search-results-count">
-                        Found {filteredCertificates.length} of {certificates.length} certificates
+                        Found {totalCount} certificate{totalCount !== 1 ? 's' : ''} matching your search
                     </p>
                 )}
             </div>
@@ -1443,7 +1449,7 @@ function AdminDashboard({ walletState, isAuthorized }) {
 
             {adminLoading ? (
                 <p className="loading">Loading...</p>
-            ) : filteredCertificates.length === 0 ? (
+            ) : certificates.length === 0 ? (
                 <p className="no-data">
                     {searchQuery ? `No certificates match "${searchQuery}"` : 'No certificates found'}
                 </p>
@@ -1453,9 +1459,9 @@ function AdminDashboard({ walletState, isAuthorized }) {
                         <div className="checkbox-col">
                             <input
                                 type="checkbox"
-                                checked={selectedCerts.size === filteredCertificates.length && filteredCertificates.length > 0}
+                                checked={selectedCerts.size === certificates.length && certificates.length > 0}
                                 onChange={toggleSelectAll}
-                                title="Select all"
+                                title="Select all on this page"
                             />
                         </div>
                         <div className="col-id">ID</div>
