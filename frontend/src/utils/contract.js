@@ -2,7 +2,7 @@ import { ethers } from 'ethers';
 
 // The address from the local deployment (update this if redeployed)
 // In a real app, you might fetch this from an API or env var
-export const CONTRACT_ADDRESS = "0x5FC8d32690cc91D4c39d9d3abcBD16989F875707";
+export const CONTRACT_ADDRESS = "0x5FbDB2315678afecb367f032d93F642f64180aa3";
 
 // Contract ABI (just the functions we need)
 const CONTRACT_ABI = [
@@ -109,9 +109,21 @@ export const revokeCertificateOnChain = async (signer, certId) => {
     const contract = getContractWithSigner(signer);
 
     try {
+        try {
+            const [, , isRevoked] = await contract.verifyCertificate(certId);
+            if (isRevoked) {
+                throw new Error("Certificate is already revoked on the blockchain.");
+            }
+        } catch (verifyErr) {
+            if (verifyErr.message && verifyErr.message.includes("does not exist")) {
+                throw new Error("Certificate does not exist on the blockchain. The local blockchain node may have been reset.");
+            }
+            // Ignore other verify errors and let estimateGas handle it
+        }
+
         await contract.revokeCertificate.estimateGas(certId);
     } catch (error) {
-        throw new Error("Transaction would fail. Are you authorized, or is the certificate ID invalid/already revoked?");
+        throw new Error(error.message || "Transaction would fail. Are you authorized, or is the certificate ID invalid/already revoked?");
     }
 
     const tx = await contract.revokeCertificate(certId);

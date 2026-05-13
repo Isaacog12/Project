@@ -33,7 +33,16 @@ async function main() {
         let envContent = fs.readFileSync(envPath, 'utf8');
         envContent = envContent.replace(/CONTRACT_ADDRESS=.*/, `CONTRACT_ADDRESS=${address}`);
         fs.writeFileSync(envPath, envContent);
-        console.log("Updated backend/.env");
+        console.log("✅ Updated backend/.env");
+    }
+
+    // Update frontend/src/utils/contract.js
+    const contractJsPath = path.join(__dirname, '../../frontend/src/utils/contract.js');
+    if (fs.existsSync(contractJsPath)) {
+        let jsContent = fs.readFileSync(contractJsPath, 'utf8');
+        jsContent = jsContent.replace(/export const CONTRACT_ADDRESS = ".*"/, `export const CONTRACT_ADDRESS = "${address}"`);
+        fs.writeFileSync(contractJsPath, jsContent);
+        console.log("✅ Updated frontend/src/utils/contract.js");
     }
 }
 

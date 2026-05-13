@@ -367,10 +367,15 @@ function PublicVerifyPage() {
                         />
                     ) : (
                         <div className="result success">
-                            <div className="verification-badge">
-                                <div className="badge-icon">✅</div>
-                                <span>BLOCKCHAIN VERIFIED</span>
+                            <div className={`verification-badge ${result.verifiedBy === 'database_fallback' ? 'local-fallback' : ''}`}>
+                                <div className="badge-icon">{result.verifiedBy === 'database_fallback' ? '🛡️' : '✅'}</div>
+                                <span>{result.verifiedBy === 'database_fallback' ? 'LOCAL REGISTRY VERIFIED' : 'BLOCKCHAIN VERIFIED'}</span>
                             </div>
+                            {result.verifiedBy === 'database_fallback' && (
+                                <div className="fallback-info-alert">
+                                    💡 <strong>Note:</strong> Verified via forensic database fallback (Local Blockchain node reset).
+                                </div>
+                            )}
 
                             <div className="cert-card">
                                 <div className="cert-card-content">
@@ -1144,7 +1149,7 @@ function AdminDashboard({ walletState, isAuthorized }) {
             alert('Certificate revoked successfully');
             loadAdminData();
         } catch (error) {
-            alert(error.response?.data?.error || 'Failed to revoke certificate');
+            alert(error.response?.data?.error || error.message || 'Failed to revoke certificate');
         } finally {
             setActionLoading(prev => ({ ...prev, [certId]: null }));
         }
@@ -1181,7 +1186,7 @@ function AdminDashboard({ walletState, isAuthorized }) {
             clearSelection();
             loadAdminData();
         } catch (error) {
-            alert(error.response?.data?.error || 'Batch revoke failed');
+            alert(error.response?.data?.error || error.message || 'Batch revoke failed');
         } finally {
             setBatchLoading(false);
         }
@@ -1442,7 +1447,6 @@ function AdminDashboard({ walletState, isAuthorized }) {
                     </table>
                 </div>
             )}
-                    )}
         </div>
     );
 }
@@ -1460,6 +1464,8 @@ function MainApp() {
     const [isAuthorized, setIsAuthorized] = useState(false);
     const [isSidebarOpen, setIsSidebarOpen] = useState(false);
     const [issuanceFee, setIssuanceFee] = useState(null);
+    const [isWrongNetwork, setIsWrongNetwork] = useState(false);
+    const [currentChainId, setCurrentChainId] = useState(null);
     useTheme();
 
     // Protection: Only allow authenticated admins
@@ -1476,6 +1482,15 @@ function MainApp() {
             const wallet = await getConnectedWallet();
             if (wallet) {
                 setWalletState(wallet);
+                setCurrentChainId(wallet.chainId);
+                
+                // Enforce Localhost 1337
+                if (wallet.chainId !== 1337) {
+                    setIsWrongNetwork(true);
+                    return;
+                }
+                setIsWrongNetwork(false);
+
                 // Check if authorized
                 const authorized = await checkAuthorization(wallet.provider, wallet.address);
                 setIsAuthorized(authorized);
@@ -1492,6 +1507,9 @@ function MainApp() {
                 } catch (feeErr) {
                     console.error("Failed to fetch fee:", feeErr);
                 }
+            } else {
+                setWalletState(null);
+                setIsWrongNetwork(false);
             }
         };
         initWallet();
@@ -1641,7 +1659,15 @@ function MainApp() {
                         </h2>
                     </div>
                     <div className="topbar-right">
-
+                        {isWrongNetwork && (
+                            <button 
+                                className="network-warning-btn" 
+                                onClick={() => switchToNetwork(1337)}
+                                title="Click to switch to Hardhat Localhost"
+                            >
+                                ⚠️ Wrong Network
+                            </button>
+                        )}
                         <WalletButton walletState={walletState} setWalletState={setWalletState} isAuthorized={isAuthorized} />
                     </div>
                 </header>
