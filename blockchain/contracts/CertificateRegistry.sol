@@ -115,4 +115,25 @@ contract CertificateRegistry is Ownable {
         Certificate memory cert = certificates[certId];
         return (cert.metadataCID, cert.issueDate, cert.isRevoked);
     }
+
+    // Batch verification for performance optimization
+    function batchVerifyCertificates(string[] memory certIds) external view returns (
+        string[] memory metadataCIDs,
+        uint256[] memory issueDates,
+        bool[] memory isRevokedStatuses
+    ) {
+        uint256 length = certIds.length;
+        metadataCIDs = new string[](length);
+        issueDates = new uint256[](length);
+        isRevokedStatuses = new bool[](length);
+
+        for (uint256 i = 0; i < length; i++) {
+            if (certificates[certIds[i]].exists) {
+                Certificate memory cert = certificates[certIds[i]];
+                metadataCIDs[i] = cert.metadataCID;
+                issueDates[i] = cert.issueDate;
+                isRevokedStatuses[i] = cert.isRevoked;
+            }
+        }
+    }
 }

@@ -114,3 +114,98 @@ code {
   color: inherit;
 }
 
+
+/* ============================================ */
+/* VIRTUALIZED TABLE STYLES */
+/* ============================================ */
+
+.certificates-table.virtualized {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  background: var(--bg-card);
+  border-radius: 12px;
+  border: 1px solid var(--border-color);
+  overflow: hidden;
+}
+
+.table-header-row,
+.table-row {
+  display: flex;
+  align-items: center;
+  padding: 0 16px;
+  border-bottom: 1px solid var(--border-color);
+}
+
+.table-header-row {
+  background: var(--bg-muted);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  font-size: 0.75rem;
+  letter-spacing: 0.05em;
+  height: 50px;
+}
+
+.table-row {
+  background: transparent;
+  transition: background 0.2s ease;
+}
+
+.table-row:hover {
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.table-row.selected-row {
+  background: rgba(139, 92, 246, 0.05);
+}
+
+.table-row.revoked-row {
+  opacity: 0.7;
+}
+
+.table-row div,
+.table-header-row div {
+  padding: 12px 8px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Column sizing */
+.checkbox-col { width: 40px; flex-shrink: 0; display: flex; justify-content: center; }
+.col-id { width: 120px; flex-shrink: 0; font-family: var(--font-mono); font-size: 0.85rem; }
+.col-student { flex: 2; min-width: 150px; }
+.col-inst { flex: 2; min-width: 150px; }
+.col-course { flex: 2; min-width: 150px; }
+.col-grade { width: 100px; flex-shrink: 0; text-align: center; }
+.col-date { width: 140px; flex-shrink: 0; }
+.col-status { width: 120px; flex-shrink: 0; }
+.col-actions { width: 120px; flex-shrink: 0; display: flex; gap: 8px; justify-content: flex-end; }
+
+.status-badge {
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.status-badge.valid { background: rgba(16, 185, 129, 0.1); color: #10b981; }
+.status-badge.revoked { background: rgba(239, 68, 68, 0.1); color: #ef4444; }
+
+.action-btn {
+  background: var(--bg-muted);
+  border: 1px solid var(--border-color);
+  border-radius: 6px;
+  width: 32px;
+  height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.action-btn:hover { background: var(--bg-hover); border-color: var(--primary-color); }
+.action-btn.revoke:hover { color: #ef4444; border-color: #ef4444; }
+.action-btn.delete:hover { color: #ef4444; border-color: #ef4444; }

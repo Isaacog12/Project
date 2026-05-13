@@ -6,6 +6,7 @@ import './App.css';
 import { getConnectedWallet, connectWallet, switchToNetwork, shortenAddress } from './utils/wallet';
 import { checkAuthorization, issueCertificateOnChain, revokeCertificateOnChain, CONTRACT_ADDRESS } from './utils/contract';
 import { PieChart, Pie, Cell, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, ResponsiveContainer } from 'recharts';
+import { List } from 'react-window';
 
 import { NIGERIAN_UNIVERSITIES, NIGERIAN_COURSES } from './constants/universities';
 
@@ -36,6 +37,26 @@ function useTheme() {
     }, []);
 
     return ['light', () => { }];
+}
+
+/**
+ * Custom hook for debouncing a value.
+ * Used to limit expensive filtering operations during search.
+ */
+function useDebounce(value, delay) {
+    const [debouncedValue, setDebouncedValue] = useState(value);
+
+    useEffect(() => {
+        const handler = setTimeout(() => {
+            setDebouncedValue(value);
+        }, delay);
+
+        return () => {
+            clearTimeout(handler);
+        };
+    }, [value, delay]);
+
+    return debouncedValue;
 }
 
 // ============================================
@@ -1025,6 +1046,7 @@ function AdminDashboard({ walletState, isAuthorized }) {
     const [stats, setStats] = useState(null);
     const [actionLoading, setActionLoading] = useState({});
     const [searchQuery, setSearchQuery] = useState('');
+    const debouncedSearchQuery = useDebounce(searchQuery, 300);
     const [selectedCerts, setSelectedCerts] = useState(new Set());
     const [batchLoading, setBatchLoading] = useState(false);
     const navigate = useNavigate();
@@ -1216,11 +1238,11 @@ function AdminDashboard({ walletState, isAuthorized }) {
         navigate(`/verify/${id}`);
     };
 
-    // Filter certificates based on search query - MEMOIZED for performance
+    // Filter certificates based on search query - MEMOIZED and DEBOUNCED
     const filteredCertificates = React.useMemo(() => {
-        if (!searchQuery) return certificates;
+        if (!debouncedSearchQuery) return certificates;
 
-        const query = searchQuery.toLowerCase();
+        const query = debouncedSearchQuery.toLowerCase();
         return certificates.filter(cert => {
             const studentName = (cert.blockchainData?.studentName || cert.studentName || '').toLowerCase();
             const course = (cert.blockchainData?.course || cert.course || '').toLowerCase();
@@ -1234,7 +1256,46 @@ function AdminDashboard({ walletState, isAuthorized }) {
                 institution.includes(query) ||
                 certIdString.includes(query);
         });
-    }, [certificates, searchQuery]);
+    }, [certificates, debouncedSearchQuery]);
+
+    const memoizedRowProps = React.useMemo(() => ({}), []);
+    const rowRenderer = React.useCallback(({ index, style }) => {
+        const cert = filteredCertificates[index];
+        if (!cert) return null;
+        return (
+            <div style={style} className={`table-row ${cert.blockchainData?.isRevoked ? 'revoked-row' : ''} ${selectedCerts.has(cert.certId) ? 'selected-row' : ''}`}>
+                <div className="checkbox-col">
+                    <input
+                        type="checkbox"
+                        checked={selectedCerts.has(cert.certId)}
+                        onChange={() => toggleSelect(cert.certId)}
+                    />
+                </div>
+                <div className="cert-id col-id">{cert.certId}</div>
+                <div className="col-student">{cert.blockchainData?.studentName || cert.studentName || '—'}</div>
+                <div className="col-inst">{cert.institution || '—'}</div>
+                <div className="col-course">{cert.blockchainData?.course || cert.course}</div>
+                <div className="col-grade">{cert.blockchainData?.grade || cert.grade}</div>
+                <div className="col-date">{cert.issueDate ? new Date(cert.issueDate).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : '—'}</div>
+                <div className="col-status">
+                    <span className={`status-badge ${cert.blockchainData?.isRevoked ? 'revoked' : 'valid'}`}>
+                        {cert.blockchainData?.isRevoked ? '❌ Revoked' : '✅ Valid'}
+                    </span>
+                </div>
+                <div className="actions col-actions">
+                    <button className="action-btn view" onClick={() => goToPublicVerify(cert.certId)}>👁️</button>
+                    {!cert.blockchainData?.isRevoked && (
+                        <button className="action-btn revoke" onClick={() => handleRevoke(cert.certId)} disabled={actionLoading[cert.certId]}>
+                            {actionLoading[cert.certId] === 'revoking' ? '...' : '🚫'}
+                        </button>
+                    )}
+                    <button className="action-btn delete" onClick={() => handleDelete(cert.certId)} disabled={actionLoading[cert.certId]}>
+                        {actionLoading[cert.certId] === 'deleting' ? '...' : '🗑️'}
+                    </button>
+                </div>
+            </div>
+        );
+    }, [filteredCertificates, selectedCerts, actionLoading, handleRevoke, handleDelete, goToPublicVerify, toggleSelect]);
 
     if (!isAdmin) {
         return (
@@ -1387,64 +1448,34 @@ function AdminDashboard({ walletState, isAuthorized }) {
                     {searchQuery ? `No certificates match "${searchQuery}"` : 'No certificates found'}
                 </p>
             ) : (
-                <div className="certificates-table">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th className="checkbox-col">
-                                    <input
-                                        type="checkbox"
-                                        checked={selectedCerts.size === filteredCertificates.length && filteredCertificates.length > 0}
-                                        onChange={toggleSelectAll}
-                                        title="Select all"
-                                    />
-                                </th>
-                                <th>ID</th>
-                                <th>Student</th>
-                                <th>Institution</th>
-                                <th>Course</th>
-                                <th>Grade</th>
-                                <th>Date Issued</th>
-                                <th>Status</th>
-                                <th>Actions</th>
-                            </tr>
-                        </thead>
-                        <tbody>
-                            {filteredCertificates.map((cert) => (
-                                <tr key={cert.certId} className={`${cert.blockchainData?.isRevoked ? 'revoked-row' : ''} ${selectedCerts.has(cert.certId) ? 'selected-row' : ''}`}>
-                                    <td className="checkbox-col">
-                                        <input
-                                            type="checkbox"
-                                            checked={selectedCerts.has(cert.certId)}
-                                            onChange={() => toggleSelect(cert.certId)}
-                                        />
-                                    </td>
-                                    <td className="cert-id">{cert.certId}</td>
-                                    <td>{cert.blockchainData?.studentName || cert.studentName || '—'}</td>
-                                    <td>{cert.institution || '—'}</td>
-                                    <td>{cert.blockchainData?.course || cert.course}</td>
-                                    <td>{cert.blockchainData?.grade || cert.grade}</td>
-                                    <td>{cert.issueDate ? new Date(cert.issueDate).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' }) : '—'}</td>
-                                    <td>
-                                        <span className={`status-badge ${cert.blockchainData?.isRevoked ? 'revoked' : 'valid'}`}>
-                                            {cert.blockchainData?.isRevoked ? '❌ Revoked' : '✅ Valid'}
-                                        </span>
-                                    </td>
-                                    <td className="actions">
-                                        <button className="action-btn view" onClick={() => goToPublicVerify(cert.certId)}>👁️</button>
-                                        {!cert.blockchainData?.isRevoked && (
-                                            <button className="action-btn revoke" onClick={() => handleRevoke(cert.certId)} disabled={actionLoading[cert.certId]}>
-                                                {actionLoading[cert.certId] === 'revoking' ? '...' : '🚫'}
-                                            </button>
-                                        )}
-                                        <button className="action-btn delete" onClick={() => handleDelete(cert.certId)} disabled={actionLoading[cert.certId]}>
-                                            {actionLoading[cert.certId] === 'deleting' ? '...' : '🗑️'}
-                                        </button>
-                                    </td>
-                                </tr>
-                            ))}
-                        </tbody>
-                    </table>
+                <div className="certificates-table virtualized">
+                    <div className="table-header-row">
+                        <div className="checkbox-col">
+                            <input
+                                type="checkbox"
+                                checked={selectedCerts.size === filteredCertificates.length && filteredCertificates.length > 0}
+                                onChange={toggleSelectAll}
+                                title="Select all"
+                            />
+                        </div>
+                        <div className="col-id">ID</div>
+                        <div className="col-student">Student</div>
+                        <div className="col-inst">Institution</div>
+                        <div className="col-course">Course</div>
+                        <div className="col-grade">Grade</div>
+                        <div className="col-date">Date Issued</div>
+                        <div className="col-status">Status</div>
+                        <div className="col-actions">Actions</div>
+                    </div>
+                    
+                    <List
+                        height={600}
+                        rowCount={filteredCertificates.length}
+                        rowHeight={60}
+                        width="100%"
+                        rowProps={memoizedRowProps}
+                        rowComponent={rowRenderer}
+                    />
                 </div>
             )}
         </div>
